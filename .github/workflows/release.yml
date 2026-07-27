@@ -1,0 +1,51 @@
+name: 发布桌面应用
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin --bundles dmg
+            rust_target: aarch64-apple-darwin
+          - platform: windows-latest
+            args: --bundles nsis
+            rust_target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
+      - run: npm ci
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 主页工坊 ${{ github.ref_name }}
+          releaseBody: |
+            ## 测试版安装说明
+
+            - macOS：首次打开可能需要在“系统设置 > 隐私与安全性”中允许应用运行。
+            - Windows：未签名测试版可能出现 SmartScreen 提示，请确认下载来源后选择继续安装。
+            - 本应用不会上传个人资料；所有编辑内容仅保存在本机。
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.args }}
