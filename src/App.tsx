@@ -1,10 +1,15 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type CSSProperties, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react'
 import { Download, FileDown, ImagePlus, Mail, Monitor, MoveDown, MoveUp, Palette, Plus, RotateCcw, Smartphone, Trash2, Upload, X } from 'lucide-react'
-import { createDefaultPortfolio, STORAGE_KEY } from './defaults'
-import { createPortfolioHtml, exportFileName, initials, isValidImage, joinTags, readImage, safeColor, safeUrl, splitTags } from './lib/portfolio'
-import type { PortfolioData, Project, SocialLink } from './types'
+import { createDefaultPortfolio, normalizePortfolio, STORAGE_KEY } from './defaults'
+import { createPortfolioHtml, exportFileName, initials, isValidImage, joinTags, readImage, splitTags } from './lib/portfolio'
+import type { PortfolioData, Project, SocialLink, TemplateId } from './types'
 
 type Notice = { kind: 'success' | 'error'; message: string } | null
+const TEMPLATE_OPTIONS: { id: TemplateId; label: string }[] = [
+  { id: 'professional', label: '清爽专业' },
+  { id: 'creative', label: '创意作品集' },
+  { id: 'resume', label: '极简履历' }
+]
 
 function createId(prefix: string): string {
   return `${prefix}-${crypto.randomUUID?.() ?? Math.random().toString(36).slice(2)}`
@@ -14,8 +19,7 @@ function loadDraft(): PortfolioData {
   try {
     const saved = localStorage.getItem(STORAGE_KEY)
     if (!saved) return createDefaultPortfolio()
-    const candidate = JSON.parse(saved) as PortfolioData
-    return candidate && typeof candidate.name === 'string' && Array.isArray(candidate.projects) ? candidate : createDefaultPortfolio()
+    return normalizePortfolio(JSON.parse(saved))
   } catch {
     return createDefaultPortfolio()
   }
@@ -66,6 +70,7 @@ export default function App() {
 
   const updateData = (patch: Partial<PortfolioData>) => setData((previous) => ({ ...previous, ...patch }))
   const exportHtml = useMemo(() => createPortfolioHtml(data), [data])
+  const previewHtml = useMemo(() => createPortfolioHtml(data, { preview: true }), [data])
 
   async function handleExport() {
     if (!data.name.trim()) {
@@ -141,8 +146,16 @@ export default function App() {
         </aside>
 
         <section className="preview-panel" aria-label="主页实时预览">
-          <div className="preview-toolbar"><div><p className="overline">实时预览</p><span>导出后与此处一致</span></div><div className="segmented" aria-label="预览尺寸"><button className={previewMode === 'desktop' ? 'active' : ''} type="button" onClick={() => setPreviewMode('desktop')}><Monitor size={16} />桌面</button><button className={previewMode === 'mobile' ? 'active' : ''} type="button" onClick={() => setPreviewMode('mobile')}><Smartphone size={16} />手机</button></div></div>
-          <div className="preview-stage"><div className={`preview-frame ${previewMode}`}><PortfolioPreview data={data} /></div></div>
+          <div className="preview-toolbar">
+            <div><p className="overline">实时预览</p><span>导出后与此处一致</span></div>
+            <div className="preview-controls">
+              <div className="segmented template-switch" aria-label="网页样式">
+                {TEMPLATE_OPTIONS.map((template) => <button className={data.templateId === template.id ? 'active' : ''} type="button" key={template.id} onClick={() => updateData({ templateId: template.id })}>{template.label}</button>)}
+              </div>
+              <div className="segmented" aria-label="预览尺寸"><button className={previewMode === 'desktop' ? 'active' : ''} type="button" title="桌面预览" onClick={() => setPreviewMode('desktop')}><Monitor size={16} /><span>桌面</span></button><button className={previewMode === 'mobile' ? 'active' : ''} type="button" title="手机预览" onClick={() => setPreviewMode('mobile')}><Smartphone size={16} /><span>手机</span></button></div>
+            </div>
+          </div>
+          <div className="preview-stage"><iframe key={previewMode} className={`preview-frame ${previewMode}`} title={`${TEMPLATE_OPTIONS.find((template) => template.id === data.templateId)?.label ?? '主页'}预览`} srcDoc={previewHtml} sandbox="allow-popups" /></div>
         </section>
       </main>
     </div>
@@ -184,15 +197,4 @@ function ProjectEditor({ project, index, total, onChange, onDelete, onMove, onNo
 
 function SocialEditor({ social, onChange, onDelete }: { social: SocialLink; onChange: (social: SocialLink) => void; onDelete: () => void }) {
   return <div className="social-row"><input value={social.label} maxLength={30} onChange={(event) => onChange({ ...social, label: event.target.value })} placeholder="名称" aria-label="社交平台名称" /><input type="url" value={social.url} onChange={(event) => onChange({ ...social, url: event.target.value })} placeholder="https://" aria-label="社交平台链接" /><button className="icon-button compact danger" type="button" title="删除社交链接" onClick={onDelete}><Trash2 size={15} /></button></div>
-}
-
-function PortfolioPreview({ data }: { data: PortfolioData }) {
-  return <div className="portfolio-preview" style={{ '--accent': safeColor(data.accentColor) } as CSSProperties}>
-    <header><strong>{data.name || '你的名字'}</strong><a href="#preview-contact">联系我</a></header>
-    <section className="preview-intro"><div><p>个人主页</p><h2>{data.headline || '一句有力量的自我介绍。'}</h2><div className="preview-bio">{data.bio || '在这里介绍你的经历、能力和想做的事。'}</div></div>{data.avatar ? <img className="preview-avatar" src={data.avatar} alt="头像预览" /> : <div className="preview-avatar preview-fallback">{initials(data.name)}</div>}</section>
-    <section className="preview-split"><h3>我擅长的事</h3><ul className="preview-pills">{data.skills.length ? data.skills.map((skill, index) => <li key={`${skill}-${index}`}>{skill}</li>) : <li>你的技能</li>}</ul></section>
-    <section className="preview-split"><h3>项目作品</h3><div className="preview-projects">{data.projects.length ? data.projects.map((project) => <article key={project.id}><div className="preview-cover">{project.image ? <img src={project.image} alt="项目封面" /> : <span>{initials(project.title)}</span>}</div><div><p>精选项目</p><h4>{project.title || '未命名项目'}{safeUrl(project.url) && <span aria-label="有项目链接"> ↗</span>}</h4><div className="preview-description">{project.description || '补充这个项目的背景、过程与成果。'}</div><ul className="preview-pills">{project.tags.map((tag, index) => <li key={`${tag}-${index}`}>{tag}</li>)}</ul></div></article>) : <div className="preview-empty">在左侧添加项目后，会显示在这里。</div>}</div></section>
-    <section id="preview-contact" className="preview-contact"><div><p>保持联系</p><h3>有想法，欢迎来信。</h3></div><div>{data.email && <span>{data.email}</span>}{data.location && <span>{data.location}</span>}{data.socials.filter((social) => social.label && safeUrl(social.url)).map((social) => <span key={social.id}>{social.label}</span>)}</div></section>
-    <footer>© {new Date().getFullYear()} {data.name || '你的名字'}</footer>
-  </div>
 }

@@ -13,6 +13,8 @@ export type Project = {
   url: string
 }
 
+export type TemplateId = 'professional' | 'creative' | 'resume'
+
 export type PortfolioData = {
   name: string
   headline: string
@@ -24,4 +26,5 @@ export type PortfolioData = {
   projects: Project[]
   socials: SocialLink[]
   accentColor: string
+  templateId: TemplateId
 }

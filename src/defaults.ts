@@ -1,6 +1,7 @@
-import type { PortfolioData } from './types'
+import type { PortfolioData, TemplateId } from './types'
 
 export const STORAGE_KEY = 'portfolio-forge-draft-v1'
+export const TEMPLATE_IDS: TemplateId[] = ['professional', 'creative', 'resume']
 
 export const defaultPortfolio: PortfolioData = {
   name: '林予安',
@@ -29,9 +30,27 @@ export const defaultPortfolio: PortfolioData = {
     { id: 'social-1', label: 'LinkedIn', url: '' },
     { id: 'social-2', label: 'Behance', url: '' }
   ],
-  accentColor: '#0f766e'
+  accentColor: '#0f766e',
+  templateId: 'professional'
 }
 
 export function createDefaultPortfolio(): PortfolioData {
   return JSON.parse(JSON.stringify(defaultPortfolio)) as PortfolioData
+}
+
+export function normalizePortfolio(candidate: unknown): PortfolioData {
+  const fallback = createDefaultPortfolio()
+  if (!candidate || typeof candidate !== 'object') return fallback
+
+  const saved = candidate as Partial<PortfolioData>
+  if (typeof saved.name !== 'string' || !Array.isArray(saved.projects)) return fallback
+
+  return {
+    ...fallback,
+    ...saved,
+    skills: Array.isArray(saved.skills) ? saved.skills : fallback.skills,
+    projects: saved.projects,
+    socials: Array.isArray(saved.socials) ? saved.socials : fallback.socials,
+    templateId: TEMPLATE_IDS.includes(saved.templateId as TemplateId) ? saved.templateId as TemplateId : fallback.templateId
+  }
 }
