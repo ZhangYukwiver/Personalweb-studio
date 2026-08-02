@@ -45,6 +45,23 @@ export type AiAttachment = {
   bytes: number
 }
 
+export type AiDocumentImage = {
+  name: string
+  src: string
+  bytes: number
+}
+
+export type AiSourceDocument = {
+  id: string
+  name: string
+  mimeType: 'application/pdf' | 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' | 'text/plain'
+  src: string
+  bytes: number
+  links: string[]
+  images: AiDocumentImage[]
+  omittedImages: number
+}
+
 export type AiProfileSnapshot = {
   name: string
   headline: string
@@ -59,6 +76,7 @@ export type AiProfileSnapshot = {
     description: string
     tags: string[]
     hasImage: boolean
+    url: string
   }>
   socials: Array<{
     label: string
@@ -66,10 +84,35 @@ export type AiProfileSnapshot = {
   }>
 }
 
+export type AiProfileCandidate = {
+  name: string
+  headline: string
+  bio: string
+  email: string
+  location: string
+  skills: string[]
+  projects: Array<{
+    title: string
+    description: string
+    tags: string[]
+    url: string
+  }>
+  socials: Array<{
+    label: string
+    url: string
+  }>
+}
+
+export type AiGenerationCandidate = {
+  design: GeneratedPageDesign
+  profile: AiProfileCandidate
+}
+
 export type GeneratePageDesignRequest = {
   prompt: string
   profile: AiProfileSnapshot
   attachments: Array<Pick<AiAttachment, 'name' | 'src' | 'intent' | 'bytes'>>
+  documents: Array<Pick<AiSourceDocument, 'name' | 'mimeType' | 'src' | 'bytes' | 'links' | 'images'>>
 }
 
 export type AiApiFormat = 'responses' | 'chatCompletions'

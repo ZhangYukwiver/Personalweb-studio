@@ -1,4 +1,13 @@
-import type { AiAttachment, AiProviderConfig, GeneratePageDesignRequest, GeneratedPageDesign, PortfolioData } from '../types'
+import type {
+  AiAttachment,
+  AiGenerationCandidate,
+  AiProfileCandidate,
+  AiProviderConfig,
+  AiSourceDocument,
+  GeneratePageDesignRequest,
+  PortfolioData
+} from '../types'
+import { safeUrl } from './portfolio'
 
 const MAX_AI_IMAGE_DIMENSION = 1920
 const AI_IMAGE_QUALITY = 0.88
@@ -11,7 +20,8 @@ export const DEFAULT_AI_PROVIDER: AiProviderConfig = {
 export function createAiGenerationRequest(
   data: PortfolioData,
   prompt: string,
-  attachments: AiAttachment[]
+  attachments: AiAttachment[],
+  documents: AiSourceDocument[] = []
 ): GeneratePageDesignRequest {
   return {
     prompt: prompt.trim(),
@@ -28,11 +38,69 @@ export function createAiGenerationRequest(
         title: project.title,
         description: project.description,
         tags: project.tags.filter(Boolean),
-        hasImage: Boolean(project.image)
+        hasImage: Boolean(project.image),
+        url: project.url
       })),
       socials: data.socials.map((social) => ({ label: social.label, url: social.url }))
     },
-    attachments: attachments.map(({ name, src, intent, bytes }) => ({ name, src, intent, bytes }))
+    attachments: attachments.map(({ name, src, intent, bytes }) => ({ name, src, intent, bytes })),
+    documents: documents.map(({ name, mimeType, src, bytes, links, images }) => ({ name, mimeType, src, bytes, links, images }))
+  }
+}
+
+export function createCurrentProfileCandidate(data: PortfolioData): AiProfileCandidate {
+  return {
+    name: data.name,
+    headline: data.headline,
+    bio: data.bio,
+    email: data.email,
+    location: data.location,
+    skills: [...data.skills],
+    projects: data.projects.map(({ title, description, tags, url }) => ({
+      title,
+      description,
+      tags: [...tags],
+      url
+    })),
+    socials: data.socials.map(({ label, url }) => ({ label, url }))
+  }
+}
+
+export function createCandidatePortfolio(data: PortfolioData, candidate: AiGenerationCandidate): PortfolioData {
+  const usedProjectIds = new Set<string>()
+  const usedSocialIds = new Set<string>()
+
+  return {
+    ...data,
+    name: candidate.profile.name.trim(),
+    headline: candidate.profile.headline.trim(),
+    bio: candidate.profile.bio.trim(),
+    email: candidate.profile.email.trim(),
+    location: candidate.profile.location.trim(),
+    skills: candidate.profile.skills.map((skill) => skill.trim()).filter(Boolean),
+    projects: candidate.profile.projects.map((project, index) => {
+      const existing = matchExistingItem(data.projects, project.title, index, usedProjectIds)
+      if (existing) usedProjectIds.add(existing.id)
+      return {
+        id: existing?.id ?? `ai-project-${index + 1}`,
+        title: project.title.trim(),
+        description: project.description.trim(),
+        tags: project.tags.map((tag) => tag.trim()).filter(Boolean),
+        image: existing?.image,
+        url: safeUrl(project.url)
+      }
+    }),
+    socials: candidate.profile.socials.map((social, index) => {
+      const existing = matchExistingItem(data.socials, social.label, index, usedSocialIds)
+      if (existing) usedSocialIds.add(existing.id)
+      return {
+        id: existing?.id ?? `ai-social-${index + 1}`,
+        label: social.label.trim(),
+        url: safeUrl(social.url)
+      }
+    }),
+    templateId: 'generated',
+    generatedDesign: candidate.design
   }
 }
 
@@ -60,12 +128,29 @@ export async function generatePageDesign(
   request: GeneratePageDesignRequest,
   apiKey: string,
   provider: AiProviderConfig
-): Promise<GeneratedPageDesign> {
+): Promise<AiGenerationCandidate> {
   if (!('__TAURI_INTERNALS__' in window)) {
     throw new Error('真实 AI 生成需要在桌面应用中运行。')
   }
   const { invoke } = await import('@tauri-apps/api/core')
-  return invoke<GeneratedPageDesign>('generate_page_design', { request, apiKey, provider })
+  return invoke<AiGenerationCandidate>('generate_page_design', { request, apiKey, provider })
+}
+
+function matchExistingItem<T extends { id: string }>(
+  items: T[],
+  candidateLabel: string,
+  index: number,
+  usedIds: Set<string>
+): T | undefined {
+  const label = candidateLabel.trim().toLocaleLowerCase()
+  const exact = items.find((item) => {
+    const value = 'title' in item ? item.title : 'label' in item ? item.label : ''
+    return !usedIds.has(item.id) && String(value).trim().toLocaleLowerCase() === label
+  })
+  if (exact) return exact
+
+  const positional = items[index]
+  return positional && !usedIds.has(positional.id) ? positional : undefined
 }
 
 export function aiEndpoint(provider: AiProviderConfig): string {

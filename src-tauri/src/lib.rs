@@ -9,6 +9,10 @@ const MAX_HTML_LENGTH: usize = 100_000;
 const MAX_CSS_LENGTH: usize = 150_000;
 const MAX_EFFECTS: usize = 32;
 const MAX_ATTACHMENT_BYTES: usize = 8 * 1024 * 1024;
+const MAX_DOCUMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_DOCUMENT_TOTAL_BYTES: usize = 20 * 1024 * 1024;
+const MAX_DOCUMENT_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+const MAX_DOCUMENT_IMAGE_TOTAL_BYTES: usize = 8 * 1024 * 1024;
 const MAX_OUTPUT_TOKENS: u64 = 12_000;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -18,6 +22,7 @@ struct GeneratePageDesignRequest {
     prompt: String,
     profile: AiProfileSnapshot,
     attachments: Vec<AiAttachmentInput>,
+    documents: Vec<AiSourceDocumentInput>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -57,6 +62,7 @@ struct AiProjectSnapshot {
     description: String,
     tags: Vec<String>,
     has_image: bool,
+    url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -71,6 +77,51 @@ struct AiAttachmentInput {
     src: String,
     intent: String,
     bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiSourceDocumentInput {
+    name: String,
+    mime_type: String,
+    src: String,
+    bytes: usize,
+    links: Vec<String>,
+    images: Vec<AiDocumentImageInput>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AiDocumentImageInput {
+    name: String,
+    src: String,
+    bytes: usize,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GeneratedPageCandidate {
+    design: GeneratedPageDesign,
+    profile: AiProfileCandidate,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AiProfileCandidate {
+    name: String,
+    headline: String,
+    bio: String,
+    email: String,
+    location: String,
+    skills: Vec<String>,
+    projects: Vec<AiProfileProjectCandidate>,
+    socials: Vec<AiSocialSnapshot>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct AiProfileProjectCandidate {
+    title: String,
+    description: String,
+    tags: Vec<String>,
+    url: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -102,7 +153,7 @@ async fn generate_page_design(
     request: GeneratePageDesignRequest,
     api_key: String,
     provider: AiProviderConfig,
-) -> Result<GeneratedPageDesign, String> {
+) -> Result<GeneratedPageCandidate, String> {
     generate_page_design_at(request, api_key.trim(), &provider, REQUEST_TIMEOUT).await
 }
 
@@ -111,8 +162,8 @@ async fn generate_page_design_at(
     api_key: &str,
     provider: &AiProviderConfig,
     timeout: Duration,
-) -> Result<GeneratedPageDesign, String> {
-    validate_request(&request, api_key)?;
+) -> Result<GeneratedPageCandidate, String> {
+    validate_request(&request, api_key, provider)?;
     let endpoint = normalize_ai_endpoint(provider)?;
     let body = create_openai_request(&request, provider)?;
     let client = reqwest::Client::builder()
@@ -181,15 +232,25 @@ fn normalize_ai_endpoint(provider: &AiProviderConfig) -> Result<Url, String> {
     Ok(url)
 }
 
-fn validate_request(request: &GeneratePageDesignRequest, api_key: &str) -> Result<(), String> {
+fn validate_request(
+    request: &GeneratePageDesignRequest,
+    api_key: &str,
+    provider: &AiProviderConfig,
+) -> Result<(), String> {
     if api_key.is_empty() || api_key.len() > 512 {
         return Err("请输入有效的 OpenAI API Key。".to_string());
     }
     if request.prompt.chars().count() > 2_000 {
         return Err("修改要求超过 2000 字限制。".to_string());
     }
-    if request.prompt.trim().is_empty() && request.attachments.is_empty() {
-        return Err("请添加参考截图或填写修改要求。".to_string());
+    if request.prompt.trim().is_empty()
+        && request.attachments.is_empty()
+        && request.documents.is_empty()
+    {
+        return Err("请添加资料文件、参考截图或填写修改要求。".to_string());
+    }
+    if !request.documents.is_empty() && provider.api_format != AiApiFormat::Responses {
+        return Err("资料文件仅支持 Responses API，请在接口设置中切换后重试。".to_string());
     }
     if request.attachments.len() > 3 {
         return Err("最多添加 3 张截图。".to_string());
@@ -214,6 +275,7 @@ fn validate_request(request: &GeneratePageDesignRequest, api_key: &str) -> Resul
     if total_bytes > MAX_ATTACHMENT_BYTES {
         return Err("截图压缩后的总大小不能超过 8MB。".to_string());
     }
+    validate_source_documents(&request.documents)?;
     let profile_bytes = serde_json::to_vec(&request.profile)
         .map_err(|_| "个人资料无法序列化。".to_string())?
         .len();
@@ -221,6 +283,99 @@ fn validate_request(request: &GeneratePageDesignRequest, api_key: &str) -> Resul
         return Err("个人资料内容超过 100KB 限制。".to_string());
     }
     Ok(())
+}
+
+fn validate_source_documents(documents: &[AiSourceDocumentInput]) -> Result<(), String> {
+    if documents.len() > 3 {
+        return Err("最多添加 3 个资料文件。".to_string());
+    }
+
+    let mut total_bytes = 0usize;
+    let mut total_image_bytes = 0usize;
+    for document in documents {
+        if document.name.trim().is_empty()
+            || document.name.chars().count() > 200
+            || !is_supported_document(document)
+        {
+            return Err("资料文件格式无效。".to_string());
+        }
+        let payload_bytes = data_url_payload_bytes(&document.src)
+            .ok_or_else(|| "资料文件格式无效。".to_string())?;
+        if payload_bytes > MAX_DOCUMENT_BYTES || document.bytes != payload_bytes {
+            return Err("资料文件大小信息无效。".to_string());
+        }
+        total_bytes = total_bytes
+            .checked_add(payload_bytes)
+            .ok_or_else(|| "资料文件总大小无效。".to_string())?;
+
+        if document.links.len() > 40
+            || document
+                .links
+                .iter()
+                .any(|link| link.chars().count() > 2_048 || !is_safe_source_link(link))
+        {
+            return Err("资料文件中的链接格式无效。".to_string());
+        }
+        if document.images.len() > 6 {
+            return Err("单个 DOCX 最多发送 6 张内嵌图片。".to_string());
+        }
+        for image in &document.images {
+            if image.name.trim().is_empty()
+                || image.name.chars().count() > 200
+                || !is_supported_image_data_url(&image.src)
+            {
+                return Err("DOCX 内嵌图片格式无效。".to_string());
+            }
+            let image_bytes = data_url_payload_bytes(&image.src)
+                .ok_or_else(|| "DOCX 内嵌图片格式无效。".to_string())?;
+            if image_bytes > MAX_DOCUMENT_IMAGE_BYTES || image.bytes != image_bytes {
+                return Err("DOCX 内嵌图片大小信息无效。".to_string());
+            }
+            total_image_bytes = total_image_bytes
+                .checked_add(image_bytes)
+                .ok_or_else(|| "DOCX 内嵌图片总大小无效。".to_string())?;
+        }
+    }
+    if total_bytes > MAX_DOCUMENT_TOTAL_BYTES {
+        return Err("资料文件总大小不能超过 20MB。".to_string());
+    }
+    if total_image_bytes > MAX_DOCUMENT_IMAGE_TOTAL_BYTES {
+        return Err("DOCX 内嵌图片总大小不能超过 8MB。".to_string());
+    }
+    Ok(())
+}
+
+fn is_supported_document(document: &AiSourceDocumentInput) -> bool {
+    let extension = document
+        .name
+        .rsplit_once('.')
+        .map(|(_, extension)| extension.to_ascii_lowercase());
+    let valid_pair = matches!(
+        (extension.as_deref(), document.mime_type.as_str()),
+        (Some("pdf"), "application/pdf")
+            | (
+                Some("docx"),
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            )
+            | (Some("txt"), "text/plain")
+    );
+    valid_pair
+        && document
+            .src
+            .starts_with(&format!("data:{};base64,", document.mime_type))
+}
+
+fn is_safe_source_link(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    if !matches!(url.scheme(), "https" | "http" | "mailto")
+        || !url.username().is_empty()
+        || url.password().is_some()
+    {
+        return false;
+    }
+    url.scheme() == "mailto" || url.host_str().is_some()
 }
 
 fn is_supported_image_data_url(value: &str) -> bool {
@@ -265,6 +420,12 @@ fn create_openai_request(
         "attachments": request.attachments.iter().map(|attachment| json!({
             "name": attachment.name,
             "intent": attachment.intent
+        })).collect::<Vec<_>>(),
+        "documents": request.documents.iter().map(|document| json!({
+            "name": document.name,
+            "mimeType": document.mime_type,
+            "links": document.links,
+            "embeddedImages": document.images.iter().map(|image| image.name.clone()).collect::<Vec<_>>()
         })).collect::<Vec<_>>()
     }))
     .map_err(|_| "无法准备生成资料。".to_string())?;
@@ -293,6 +454,24 @@ fn create_responses_request(
             "detail": "high"
         }));
     }
+    for document in &request.documents {
+        let mut file = json!({
+            "type": "input_file",
+            "filename": document.name,
+            "file_data": document.src
+        });
+        if document.mime_type == "application/pdf" {
+            file["detail"] = json!("high");
+        }
+        content.push(file);
+        for image in &document.images {
+            content.push(json!({
+                "type": "input_image",
+                "image_url": image.src,
+                "detail": "high"
+            }));
+        }
+    }
 
     Ok(json!({
         "model": model,
@@ -314,9 +493,9 @@ fn create_responses_request(
         "text": {
             "format": {
                 "type": "json_schema",
-                "name": "generated_page_design",
+                "name": "generated_page_candidate",
                 "strict": true,
-                "schema": generated_design_schema()
+                "schema": generated_candidate_schema()
             }
         }
     }))
@@ -327,6 +506,9 @@ fn create_chat_completions_request(
     model: &str,
     context: String,
 ) -> Result<Value, String> {
+    if !request.documents.is_empty() {
+        return Err("资料文件仅支持 Responses API，请在接口设置中切换后重试。".to_string());
+    }
     let mut content = vec![json!({
         "type": "text",
         "text": user_context(&context)
@@ -341,7 +523,7 @@ fn create_chat_completions_request(
         }));
     }
 
-    let schema = serde_json::to_string(&generated_design_schema())
+    let schema = serde_json::to_string(&generated_candidate_schema())
         .map_err(|_| "无法准备生成格式。".to_string())?;
     Ok(json!({
         "model": model,
@@ -360,14 +542,17 @@ fn create_chat_completions_request(
 }
 
 fn user_context(context: &str) -> String {
-    format!("Use this user-owned source data and request as design context. Do not copy text or assets from the reference screenshots. Source data:\n{context}")
+    format!("Use this user-owned profile, source material, and request. Never open or fetch any supplied link. Do not copy text or assets from reference screenshots. Source data:\n{context}")
 }
 
 fn design_instructions() -> &'static str {
-    r#"Create one original, immersive personal portfolio design for desktop only.
-Return semantic HTML body markup, CSS, and trusted effect declarations. Never generate JavaScript.
+    r#"Create one original, immersive personal portfolio candidate for desktop only.
+Return one object containing a structured editable profile and a page design with semantic HTML body markup, CSS, and trusted effect declarations. Never generate JavaScript.
 Use the reference screenshots only for visual language, hierarchy, pacing, and interaction rhythm. Do not reproduce their words, logos, images, or source code.
-The user's profile is the only source of personal facts. Do not hard-code those facts into the HTML. Render them only through these data slots:
+The current profile and source documents are the only sources of personal facts. Never invent employment, education, clients, metrics, awards, contact details, project claims, or links.
+When source documents are present, treat them as the primary factual source and use the current editable profile only to fill gaps. When no source documents are present, return the current profile without changing its facts.
+Extract only clearly attributable http, https, and mailto links into the editable profile. Never browse those links. Embedded document images are context only and must not be referenced in the returned HTML, CSS, or profile.
+Do not hard-code personal facts into the HTML. Render them only through these data slots:
 name, headline, bio, avatar, skills, projects, contact.
 The HTML must include name, headline, bio, skills, projects, and contact at least once using data-slot attributes. The avatar slot is optional.
 Allowed tags: header, main, section, article, div, nav, footer, h1, h2, h3, p, span, ul, ol, li, a, strong, em, small, blockquote, figure, figcaption, hr.
@@ -381,7 +566,19 @@ CSS must be self-contained. Do not use url(), @import, @font-face, external reso
 Design for a minimum 980px desktop canvas. Do not add mobile breakpoints or claim mobile support. Keep all text readable with long Chinese content and missing images."#
 }
 
-fn generated_design_schema() -> Value {
+fn generated_candidate_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "design": page_design_schema(),
+            "profile": profile_candidate_schema()
+        },
+        "required": ["design", "profile"],
+        "additionalProperties": false
+    })
+}
+
+fn page_design_schema() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -413,6 +610,58 @@ fn generated_design_schema() -> Value {
             "createdAt": { "type": "string" }
         },
         "required": ["version", "bodyHtml", "css", "effects", "createdAt"],
+        "additionalProperties": false
+    })
+}
+
+fn profile_candidate_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "name": { "type": "string", "maxLength": 40 },
+            "headline": { "type": "string", "maxLength": 120 },
+            "bio": { "type": "string", "maxLength": 500 },
+            "email": { "type": "string", "maxLength": 254 },
+            "location": { "type": "string", "maxLength": 80 },
+            "skills": {
+                "type": "array",
+                "maxItems": 20,
+                "items": { "type": "string", "maxLength": 60 }
+            },
+            "projects": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "maxLength": 120 },
+                        "description": { "type": "string", "maxLength": 500 },
+                        "tags": {
+                            "type": "array",
+                            "maxItems": 12,
+                            "items": { "type": "string", "maxLength": 60 }
+                        },
+                        "url": { "type": "string", "maxLength": 2048 }
+                    },
+                    "required": ["title", "description", "tags", "url"],
+                    "additionalProperties": false
+                }
+            },
+            "socials": {
+                "type": "array",
+                "maxItems": 12,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "label": { "type": "string", "maxLength": 60 },
+                        "url": { "type": "string", "maxLength": 2048 }
+                    },
+                    "required": ["label", "url"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["name", "headline", "bio", "email", "location", "skills", "projects", "socials"],
         "additionalProperties": false
     })
 }
@@ -451,7 +700,7 @@ fn status_error(status: StatusCode) -> String {
 fn parse_openai_response(
     body: &[u8],
     api_format: AiApiFormat,
-) -> Result<GeneratedPageDesign, String> {
+) -> Result<GeneratedPageCandidate, String> {
     let response: Value =
         serde_json::from_slice(body).map_err(|_| "AI 接口返回格式异常。".to_string())?;
     if response.get("error").is_some_and(|error| !error.is_null()) {
@@ -464,7 +713,7 @@ fn parse_openai_response(
     }
 }
 
-fn parse_responses_output(response: &Value) -> Result<GeneratedPageDesign, String> {
+fn parse_responses_output(response: &Value) -> Result<GeneratedPageCandidate, String> {
     if response.get("status").and_then(Value::as_str) == Some("incomplete") {
         return Err("AI 接口未能完整生成页面，请缩短要求后重试。".to_string());
     }
@@ -488,13 +737,13 @@ fn parse_responses_output(response: &Value) -> Result<GeneratedPageDesign, Strin
                 .get("text")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "AI 接口返回格式异常。".to_string())?;
-            return parse_generated_design_text(text);
+            return parse_generated_candidate_text(text);
         }
     }
     Err("AI 接口没有返回可用的页面设计。".to_string())
 }
 
-fn parse_chat_completions_output(response: &Value) -> Result<GeneratedPageDesign, String> {
+fn parse_chat_completions_output(response: &Value) -> Result<GeneratedPageCandidate, String> {
     let choice = response
         .get("choices")
         .and_then(Value::as_array)
@@ -516,13 +765,13 @@ fn parse_chat_completions_output(response: &Value) -> Result<GeneratedPageDesign
         .get("content")
         .ok_or_else(|| "AI 接口没有返回可用的页面设计。".to_string())?;
     if let Some(text) = content.as_str() {
-        return parse_generated_design_text(text);
+        return parse_generated_candidate_text(text);
     }
     if let Some(parts) = content.as_array() {
         for part in parts {
             if part.get("type").and_then(Value::as_str) == Some("text") {
                 if let Some(text) = part.get("text").and_then(Value::as_str) {
-                    return parse_generated_design_text(text);
+                    return parse_generated_candidate_text(text);
                 }
             }
         }
@@ -530,7 +779,7 @@ fn parse_chat_completions_output(response: &Value) -> Result<GeneratedPageDesign
     Err("AI 接口没有返回可用的页面设计。".to_string())
 }
 
-fn parse_generated_design_text(text: &str) -> Result<GeneratedPageDesign, String> {
+fn parse_generated_candidate_text(text: &str) -> Result<GeneratedPageCandidate, String> {
     let trimmed = text.trim();
     let json_text = if let Some(fenced) = trimmed.strip_prefix("```") {
         let (_, content) = fenced
@@ -543,11 +792,53 @@ fn parse_generated_design_text(text: &str) -> Result<GeneratedPageDesign, String
     } else {
         trimmed
     };
-    let mut design: GeneratedPageDesign =
+    let mut candidate: GeneratedPageCandidate =
         serde_json::from_str(json_text).map_err(|_| "AI 接口返回的页面格式异常。".to_string())?;
-    validate_generated_design(&design)?;
-    design.created_at = Utc::now().to_rfc3339();
-    Ok(design)
+    validate_generated_candidate(&candidate)?;
+    candidate.design.created_at = Utc::now().to_rfc3339();
+    Ok(candidate)
+}
+
+fn validate_generated_candidate(candidate: &GeneratedPageCandidate) -> Result<(), String> {
+    validate_generated_design(&candidate.design)?;
+    let profile = &candidate.profile;
+    if profile.name.trim().is_empty()
+        || profile.name.chars().count() > 40
+        || profile.headline.trim().is_empty()
+        || profile.headline.chars().count() > 120
+        || profile.bio.chars().count() > 500
+        || profile.email.chars().count() > 254
+        || profile.location.chars().count() > 80
+        || profile.skills.len() > 20
+        || profile
+            .skills
+            .iter()
+            .any(|skill| skill.chars().count() > 60)
+        || profile.projects.len() > 12
+        || profile.socials.len() > 12
+    {
+        return Err("AI 接口返回的个人资料超过安全限制。".to_string());
+    }
+    for project in &profile.projects {
+        if project.title.chars().count() > 120
+            || project.description.chars().count() > 500
+            || project.tags.len() > 12
+            || project.tags.iter().any(|tag| tag.chars().count() > 60)
+            || !is_optional_safe_profile_url(&project.url)
+        {
+            return Err("AI 接口返回的项目资料无效。".to_string());
+        }
+    }
+    for social in &profile.socials {
+        if social.label.chars().count() > 60 || !is_optional_safe_profile_url(&social.url) {
+            return Err("AI 接口返回的社交链接无效。".to_string());
+        }
+    }
+    Ok(())
+}
+
+fn is_optional_safe_profile_url(value: &str) -> bool {
+    value.trim().is_empty() || (value.chars().count() <= 2_048 && is_safe_source_link(value))
 }
 
 fn validate_generated_design(design: &GeneratedPageDesign) -> Result<(), String> {
@@ -587,8 +878,9 @@ mod tests {
 
     use super::{
         create_openai_request, generate_page_design_at, normalize_ai_endpoint, save_html_file,
-        AiApiFormat, AiAttachmentInput, AiProfileSnapshot, AiProjectSnapshot, AiProviderConfig,
-        AiSocialSnapshot, GeneratePageDesignRequest, MAX_OUTPUT_TOKENS,
+        AiApiFormat, AiAttachmentInput, AiDocumentImageInput, AiProfileSnapshot, AiProjectSnapshot,
+        AiProviderConfig, AiSocialSnapshot, AiSourceDocumentInput, GeneratePageDesignRequest,
+        MAX_OUTPUT_TOKENS,
     };
 
     #[test]
@@ -606,14 +898,14 @@ mod tests {
 
     #[tokio::test]
     async fn generates_a_structured_design() {
-        let design = valid_design();
+        let candidate = valid_candidate();
         let body = json!({
             "status": "completed",
             "output": [{
                 "type": "message",
                 "content": [{
                     "type": "output_text",
-                    "text": serde_json::to_string(&design).unwrap()
+                    "text": serde_json::to_string(&candidate).unwrap()
                 }]
             }]
         })
@@ -630,16 +922,17 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.version, 1);
-        assert!(result.body_html.contains("data-slot=\"projects\""));
-        assert!(!result.created_at.is_empty());
+        assert_eq!(result.design.version, 1);
+        assert!(result.design.body_html.contains("data-slot=\"projects\""));
+        assert!(!result.design.created_at.is_empty());
+        assert_eq!(result.profile.name, "林予安");
     }
 
     #[tokio::test]
     async fn generates_a_design_from_chat_completions() {
         let content = format!(
             "```json\n{}\n```",
-            serde_json::to_string(&valid_design()).unwrap()
+            serde_json::to_string(&valid_candidate()).unwrap()
         );
         let body = json!({
             "choices": [{
@@ -660,8 +953,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(result.version, 1);
-        assert!(result.body_html.contains("data-slot=\"projects\""));
+        assert_eq!(result.design.version, 1);
+        assert!(result.design.body_html.contains("data-slot=\"projects\""));
     }
 
     #[test]
@@ -673,6 +966,18 @@ mod tests {
             intent: "reference".into(),
             bytes: 1,
         });
+        request.documents.push(AiSourceDocumentInput {
+            name: "resume.pdf".into(),
+            mime_type: "application/pdf".into(),
+            src: "data:application/pdf;base64,YQ==".into(),
+            bytes: 1,
+            links: vec!["https://example.com/work".into()],
+            images: vec![AiDocumentImageInput {
+                name: "photo.png".into(),
+                src: "data:image/png;base64,YQ==".into(),
+                bytes: 1,
+            }],
+        });
 
         let body = create_openai_request(&request, &test_provider("https://example.com/v1".into()))
             .unwrap();
@@ -682,6 +987,9 @@ mod tests {
         assert_eq!(body["store"], false);
         assert_eq!(body["max_output_tokens"], MAX_OUTPUT_TOKENS);
         assert_eq!(body["input"][1]["content"][1]["detail"], "high");
+        assert_eq!(body["input"][1]["content"][2]["type"], "input_file");
+        assert_eq!(body["input"][1]["content"][2]["detail"], "high");
+        assert_eq!(body["input"][1]["content"][3]["type"], "input_image");
         assert!(body.get("reasoning").is_none());
         assert!(body["text"].get("verbosity").is_none());
         assert!(!serialized.contains("API Key"));
@@ -717,6 +1025,76 @@ mod tests {
         assert!(body.get("store").is_none());
         assert!(body.get("response_format").is_none());
         assert!(!serialized.contains("API Key"));
+    }
+
+    #[tokio::test]
+    async fn rejects_document_inputs_for_chat_completions() {
+        let mut request = valid_request();
+        request.documents.push(AiSourceDocumentInput {
+            name: "resume.txt".into(),
+            mime_type: "text/plain".into(),
+            src: "data:text/plain;base64,YQ==".into(),
+            bytes: 1,
+            links: Vec::new(),
+            images: Vec::new(),
+        });
+
+        let error = generate_page_design_at(
+            request,
+            "test-key",
+            &test_chat_provider("https://example.com/v1".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(error.contains("仅支持 Responses"));
+    }
+
+    #[tokio::test]
+    async fn rejects_unsafe_document_and_candidate_links() {
+        let mut unsafe_request = valid_request();
+        unsafe_request.documents.push(AiSourceDocumentInput {
+            name: "resume.txt".into(),
+            mime_type: "text/plain".into(),
+            src: "data:text/plain;base64,YQ==".into(),
+            bytes: 1,
+            links: vec!["javascript:alert(1)".into()],
+            images: Vec::new(),
+        });
+        let input_error = generate_page_design_at(
+            unsafe_request,
+            "test-key",
+            &test_provider("https://example.com/v1".into()),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(input_error.contains("链接格式无效"));
+
+        let mut unsafe_candidate = valid_candidate();
+        unsafe_candidate["profile"]["socials"][0]["url"] = json!("javascript:alert(1)");
+        let response_body = json!({
+            "status": "completed",
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "output_text",
+                    "text": serde_json::to_string(&unsafe_candidate).unwrap()
+                }]
+            }]
+        })
+        .to_string();
+        let endpoint = mock_endpoint(200, response_body, Duration::ZERO).await;
+        let output_error = generate_page_design_at(
+            valid_request(),
+            "test-key",
+            &test_provider(endpoint),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert!(output_error.contains("社交链接无效"));
     }
 
     #[test]
@@ -898,6 +1276,7 @@ mod tests {
                     description: "项目简介".into(),
                     tags: vec!["设计".into()],
                     has_image: false,
+                    url: "https://example.com/project".into(),
                 }],
                 socials: vec![AiSocialSnapshot {
                     label: "个人网站".into(),
@@ -905,7 +1284,32 @@ mod tests {
                 }],
             },
             attachments: Vec::<AiAttachmentInput>::new(),
+            documents: Vec::<AiSourceDocumentInput>::new(),
         }
+    }
+
+    fn valid_candidate() -> serde_json::Value {
+        json!({
+            "design": valid_design(),
+            "profile": {
+                "name": "林予安",
+                "headline": "产品设计师",
+                "bio": "简介",
+                "email": "hello@example.com",
+                "location": "上海",
+                "skills": ["产品设计"],
+                "projects": [{
+                    "title": "项目",
+                    "description": "项目简介",
+                    "tags": ["设计"],
+                    "url": "https://example.com/project"
+                }],
+                "socials": [{
+                    "label": "个人网站",
+                    "url": "https://example.com"
+                }]
+            }
+        })
     }
 
     fn valid_design() -> serde_json::Value {

@@ -2,29 +2,81 @@
 
 import { describe, expect, it } from 'vitest'
 import { createDefaultPortfolio } from '../defaults'
-import { aiEndpoint, createAiGenerationRequest, DEFAULT_AI_PROVIDER } from './aiGeneration'
+import type { AiGenerationCandidate, AiSourceDocument } from '../types'
+import { aiEndpoint, createAiGenerationRequest, createCandidatePortfolio, DEFAULT_AI_PROVIDER } from './aiGeneration'
 
 describe('AI generation request', () => {
   it('sends profile facts without persisted designs or embedded portfolio images', () => {
     const data = createDefaultPortfolio()
     data.avatar = 'data:image/png;base64,avatar-secret'
     data.projects[0].image = 'data:image/png;base64,project-secret'
+    const document: AiSourceDocument = {
+      id: 'document-1',
+      name: 'resume.pdf',
+      mimeType: 'application/pdf',
+      src: 'data:application/pdf;base64,cGRm',
+      bytes: 3,
+      links: ['https://example.com'],
+      images: [],
+      omittedImages: 0
+    }
     const request = createAiGenerationRequest(data, '  调整视觉节奏  ', [{
       id: 'attachment-1',
       name: 'reference.jpg',
       src: 'data:image/jpeg;base64,reference',
       intent: 'reference',
       bytes: 9
-    }])
+    }], [document])
     const serialized = JSON.stringify(request)
 
     expect(request.prompt).toBe('调整视觉节奏')
     expect(request.profile.hasAvatar).toBe(true)
     expect(request.profile.projects[0].hasImage).toBe(true)
     expect(request.attachments).toHaveLength(1)
+    expect(request.documents).toEqual([expect.objectContaining({ name: 'resume.pdf', bytes: 3 })])
     expect(serialized).not.toContain('avatar-secret')
     expect(serialized).not.toContain('project-secret')
     expect(serialized).not.toContain('generatedDesign')
+  })
+
+  it('applies profile candidates while preserving local images and stable ids', () => {
+    const data = createDefaultPortfolio()
+    data.avatar = 'data:image/png;base64,avatar'
+    data.projects[0].image = 'data:image/png;base64,cover'
+    const candidate: AiGenerationCandidate = {
+      design: {
+        version: 1,
+        bodyHtml: '<main></main>',
+        css: 'body{}',
+        effects: [],
+        createdAt: '2026-08-02T00:00:00Z'
+      },
+      profile: {
+        name: ' 新姓名 ',
+        headline: '新标题',
+        bio: '新简介',
+        email: 'new@example.com',
+        location: '杭州',
+        skills: [' 研究 ', '设计'],
+        projects: [{
+          title: data.projects[0].title,
+          description: '新的项目介绍',
+          tags: ['产品'],
+          url: 'https://example.com/work'
+        }],
+        socials: [{ label: '作品集', url: 'javascript:alert(1)' }]
+      }
+    }
+
+    const applied = createCandidatePortfolio(data, candidate)
+
+    expect(applied.name).toBe('新姓名')
+    expect(applied.avatar).toBe(data.avatar)
+    expect(applied.projects[0].id).toBe(data.projects[0].id)
+    expect(applied.projects[0].image).toBe(data.projects[0].image)
+    expect(applied.projects[0].url).toBe('https://example.com/work')
+    expect(applied.socials[0].url).toBe('')
+    expect(applied.generatedDesign).toBe(candidate.design)
   })
 
   it('normalizes both compatible endpoint formats and rejects unsafe public HTTP', () => {
