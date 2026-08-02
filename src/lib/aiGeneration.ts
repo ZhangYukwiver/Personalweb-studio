@@ -5,7 +5,8 @@ import type {
   AiProviderConfig,
   AiSourceDocument,
   GeneratePageDesignRequest,
-  PortfolioData
+  PortfolioData,
+  WebDesignSource
 } from '../types'
 import { safeUrl } from './portfolio'
 
@@ -21,7 +22,8 @@ export function createAiGenerationRequest(
   data: PortfolioData,
   prompt: string,
   attachments: AiAttachment[],
-  documents: AiSourceDocument[] = []
+  documents: AiSourceDocument[] = [],
+  designSources: WebDesignSource[] = []
 ): GeneratePageDesignRequest {
   return {
     prompt: prompt.trim(),
@@ -44,7 +46,16 @@ export function createAiGenerationRequest(
       socials: data.socials.map((social) => ({ label: social.label, url: social.url }))
     },
     attachments: attachments.map(({ name, src, intent, bytes }) => ({ name, src, intent, bytes })),
-    documents: documents.map(({ name, mimeType, src, bytes, links, images }) => ({ name, mimeType, src, bytes, links, images }))
+    documents: documents.map(({ name, mimeType, src, bytes, links, images }) => ({ name, mimeType, src, bytes, links, images })),
+    designSources: designSources.map(({ id, name, description, tags, bodyHtml, css, bytes }) => ({
+      id,
+      name,
+      description,
+      tags,
+      bodyHtml,
+      css,
+      bytes
+    }))
   }
 }
 

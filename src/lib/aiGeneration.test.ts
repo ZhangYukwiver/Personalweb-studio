@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest'
 import { createDefaultPortfolio } from '../defaults'
-import type { AiGenerationCandidate, AiSourceDocument } from '../types'
+import type { AiGenerationCandidate, AiSourceDocument, WebDesignSource } from '../types'
 import { aiEndpoint, createAiGenerationRequest, createCandidatePortfolio, DEFAULT_AI_PROVIDER } from './aiGeneration'
 
 describe('AI generation request', () => {
@@ -20,13 +20,25 @@ describe('AI generation request', () => {
       images: [],
       omittedImages: 0
     }
+    const designSource: WebDesignSource = {
+      id: 'design-1',
+      name: '编辑风格',
+      description: '网格排版',
+      tags: ['网格布局'],
+      bodyHtml: '<main><h1>标题</h1></main>',
+      previewHtml: '<main><h1>不发送的原文</h1></main>',
+      css: 'main{display:grid}',
+      importedAt: '2026-08-02T00:00:00Z',
+      bytes: 51,
+      storageBytes: 92
+    }
     const request = createAiGenerationRequest(data, '  调整视觉节奏  ', [{
       id: 'attachment-1',
       name: 'reference.jpg',
       src: 'data:image/jpeg;base64,reference',
       intent: 'reference',
       bytes: 9
-    }], [document])
+    }], [document], [designSource])
     const serialized = JSON.stringify(request)
 
     expect(request.prompt).toBe('调整视觉节奏')
@@ -34,8 +46,10 @@ describe('AI generation request', () => {
     expect(request.profile.projects[0].hasImage).toBe(true)
     expect(request.attachments).toHaveLength(1)
     expect(request.documents).toEqual([expect.objectContaining({ name: 'resume.pdf', bytes: 3 })])
+    expect(request.designSources).toEqual([expect.objectContaining({ id: 'design-1', name: '编辑风格' })])
     expect(serialized).not.toContain('avatar-secret')
     expect(serialized).not.toContain('project-secret')
+    expect(serialized).not.toContain('不发送的原文')
     expect(serialized).not.toContain('generatedDesign')
   })
 
@@ -44,6 +58,8 @@ describe('AI generation request', () => {
     data.avatar = 'data:image/png;base64,avatar'
     data.projects[0].image = 'data:image/png;base64,cover'
     const candidate: AiGenerationCandidate = {
+      sourceDesignId: 'design-1',
+      matchReason: '网格布局适合作品展示',
       design: {
         version: 1,
         bodyHtml: '<main></main>',

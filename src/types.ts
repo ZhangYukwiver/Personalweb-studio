@@ -62,6 +62,24 @@ export type AiSourceDocument = {
   omittedImages: number
 }
 
+export type WebDesignSource = {
+  id: string
+  name: string
+  description: string
+  tags: string[]
+  bodyHtml: string
+  previewHtml: string
+  css: string
+  importedAt: string
+  bytes: number
+  storageBytes: number
+}
+
+export type AiWebDesignSource = Pick<
+  WebDesignSource,
+  'id' | 'name' | 'description' | 'tags' | 'bodyHtml' | 'css' | 'bytes'
+>
+
 export type AiProfileSnapshot = {
   name: string
   headline: string
@@ -106,6 +124,8 @@ export type AiProfileCandidate = {
 export type AiGenerationCandidate = {
   design: GeneratedPageDesign
   profile: AiProfileCandidate
+  sourceDesignId: string
+  matchReason: string
 }
 
 export type GeneratePageDesignRequest = {
@@ -113,6 +133,7 @@ export type GeneratePageDesignRequest = {
   profile: AiProfileSnapshot
   attachments: Array<Pick<AiAttachment, 'name' | 'src' | 'intent' | 'bytes'>>
   documents: Array<Pick<AiSourceDocument, 'name' | 'mimeType' | 'src' | 'bytes' | 'links' | 'images'>>
+  designSources: AiWebDesignSource[]
 }
 
 export type AiApiFormat = 'responses' | 'chatCompletions'

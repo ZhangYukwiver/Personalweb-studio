@@ -1,11 +1,12 @@
 import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type ReactNode } from 'react'
-import { Check, ClipboardPaste, Download, FileDown, FileText, ImagePlus, KeyRound, Mail, Monitor, MoveDown, MoveUp, Palette, Plus, RefreshCw, RotateCcw, Send, Settings2, Sparkles, Smartphone, Trash2, Upload, X } from 'lucide-react'
+import { Check, ClipboardPaste, Download, FileCode2, FileDown, FileText, ImagePlus, KeyRound, Library, Mail, Monitor, MoveDown, MoveUp, Palette, Plus, RefreshCw, RotateCcw, Send, Settings2, Sparkles, Smartphone, Trash2, Upload, X } from 'lucide-react'
 import { createDefaultPortfolio, normalizePortfolio, STORAGE_KEY } from './defaults'
 import { aiEndpoint, compressAiImage, createAiGenerationRequest, createCandidatePortfolio, createCurrentProfileCandidate, DEFAULT_AI_PROVIDER, generatePageDesign } from './lib/aiGeneration'
+import { createDesignSourcePreviewHtml, DESIGN_LIBRARY_STORAGE_KEY, designSourceFileError, MAX_DESIGN_LIBRARY_ITEMS, MAX_DESIGN_LIBRARY_TOTAL_BYTES, normalizeDesignLibrary, prepareWebDesignSource, WEB_DESIGN_SOURCE_ACCEPT } from './lib/designLibrary'
 import { createImmersiveGeneratedDesign, sanitizeGeneratedDesign } from './lib/generatedPage'
 import { createPortfolioHtml, exportFileName, initials, isValidImage, joinTags, readImage, splitTags } from './lib/portfolio'
 import { formatBytes, MAX_SOURCE_DOCUMENTS, MAX_SOURCE_DOCUMENT_TOTAL_BYTES, prepareAiSourceDocument, SOURCE_DOCUMENT_ACCEPT, sourceDocumentError } from './lib/sourceDocuments'
-import type { AiAttachment, AiGenerationCandidate, AiProviderConfig, AiSourceDocument, PortfolioData, Project, SocialLink, TemplateId } from './types'
+import type { AiAttachment, AiGenerationCandidate, AiProviderConfig, AiSourceDocument, PortfolioData, Project, SocialLink, TemplateId, WebDesignSource } from './types'
 
 type Notice = { kind: 'success' | 'error'; message: string } | null
 type ImageIntent = 'reference' | 'target'
@@ -27,6 +28,15 @@ function loadDraft(): PortfolioData {
     return normalizePortfolio(JSON.parse(saved))
   } catch {
     return createDefaultPortfolio()
+  }
+}
+
+function loadDesignLibrary(): WebDesignSource[] {
+  try {
+    const saved = localStorage.getItem(DESIGN_LIBRARY_STORAGE_KEY)
+    return saved ? normalizeDesignLibrary(JSON.parse(saved)) : []
+  } catch {
+    return []
   }
 }
 
@@ -62,6 +72,7 @@ async function saveExport(content: string, filename: string): Promise<void> {
 
 export default function App() {
   const [data, setData] = useState<PortfolioData>(loadDraft)
+  const [designLibrary, setDesignLibrary] = useState<WebDesignSource[]>(loadDesignLibrary)
   const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop')
   const [notice, setNotice] = useState<Notice>(null)
   const [aiPrompt, setAiPrompt] = useState('')
@@ -78,6 +89,9 @@ export default function App() {
   const [aiProviderDraft, setAiProviderDraft] = useState<AiProviderConfig>(() => ({ ...DEFAULT_AI_PROVIDER }))
   const [showAiSettings, setShowAiSettings] = useState(false)
   const [showAiConfirmation, setShowAiConfirmation] = useState(false)
+  const [showDesignLibrary, setShowDesignLibrary] = useState(false)
+  const [isImportingDesign, setIsImportingDesign] = useState(false)
+  const [pendingDesignDeleteId, setPendingDesignDeleteId] = useState<string | null>(null)
   const [generationStage, setGenerationStage] = useState<GenerationStage>('idle')
   const previewStageRef = useRef<HTMLDivElement>(null)
 
@@ -89,12 +103,22 @@ export default function App() {
     }
   }, [data])
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(DESIGN_LIBRARY_STORAGE_KEY, JSON.stringify(designLibrary))
+    } catch {
+      setNotice({ kind: 'error', message: '网页库超出本机存储空间，请删除较大的设计后重试。' })
+    }
+  }, [designLibrary])
+
   const updateData = (patch: Partial<PortfolioData>) => setData((previous) => ({ ...previous, ...patch }))
   const candidateData = useMemo(() => candidate ? createCandidatePortfolio(data, candidate) : null, [candidate, data])
   const previewData = candidateData && candidateView === 'candidate' ? candidateData : data
   const generatedPreview = previewData.templateId === 'generated'
   const exportHtml = useMemo(() => createPortfolioHtml(data), [data])
   const previewHtml = useMemo(() => createPortfolioHtml(previewData, { preview: true }), [previewData])
+  const candidateSource = candidate ? designLibrary.find((source) => source.id === candidate.sourceDesignId) : undefined
+  const designLibraryBytes = designLibrary.reduce((total, source) => total + source.storageBytes, 0)
 
   useEffect(() => {
     if (generatedPreview && previewMode === 'mobile') setPreviewMode('desktop')
@@ -211,9 +235,49 @@ export default function App() {
     }
   }
 
+  async function handleDesignSourceInput(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    if (!files.length) return
+    const remaining = MAX_DESIGN_LIBRARY_ITEMS - designLibrary.length
+    if (remaining <= 0 || files.length > remaining) {
+      setNotice({ kind: 'error', message: `网页库最多保存 ${MAX_DESIGN_LIBRARY_ITEMS} 个设计。` })
+      return
+    }
+    const invalid = files.map(designSourceFileError).find(Boolean)
+    if (invalid) {
+      setNotice({ kind: 'error', message: invalid })
+      return
+    }
+
+    setIsImportingDesign(true)
+    try {
+      const next: WebDesignSource[] = []
+      let nextBytes = designLibraryBytes
+      for (const file of files) {
+        const source = await prepareWebDesignSource(file, createId('design'))
+        nextBytes += source.storageBytes
+        if (nextBytes > MAX_DESIGN_LIBRARY_TOTAL_BYTES) {
+          throw new Error('网页库提取后的 HTML 与 CSS 总计不能超过 2MB。')
+        }
+        next.push(source)
+      }
+      setDesignLibrary((previous) => [...next, ...previous])
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      setIsImportingDesign(false)
+    }
+  }
+
+  function removeDesignSource(source: WebDesignSource) {
+    setDesignLibrary((previous) => previous.filter((item) => item.id !== source.id))
+    setPendingDesignDeleteId(null)
+  }
+
   function handleGenerateCandidate() {
-    if (!aiPrompt.trim() && !attachments.length && !sourceDocuments.length) {
-      setNotice({ kind: 'error', message: '请添加资料文件、参考截图或填写修改要求。' })
+    if (!aiPrompt.trim() && !attachments.length && !sourceDocuments.length && !designLibrary.length) {
+      setNotice({ kind: 'error', message: '请添加网页设计、资料文件、参考截图或填写修改要求。' })
       return
     }
     if (isGenerating || isProcessingDocuments) return
@@ -242,7 +306,12 @@ export default function App() {
     setIsGenerating(true)
     try {
       const result = sanitizeGeneratedDesign(createImmersiveGeneratedDesign())
-      setCandidate({ design: result.design, profile: createCurrentProfileCandidate(data) })
+      setCandidate({
+        design: result.design,
+        profile: createCurrentProfileCandidate(data),
+        sourceDesignId: '',
+        matchReason: designLibrary.length ? '本地验收未调用 AI，配置接口后将自动匹配网页库。' : ''
+      })
       setCandidateView('candidate')
       setPreviewMode('desktop')
       setNotice({ kind: 'success', message: '已生成本地候选，确认应用前不会修改当前主页。' })
@@ -258,7 +327,7 @@ export default function App() {
     setIsGenerating(true)
     setGenerationStage('sending')
     try {
-      const request = createAiGenerationRequest(data, aiPrompt, attachments, sourceDocuments)
+      const request = createAiGenerationRequest(data, aiPrompt, attachments, sourceDocuments, designLibrary)
       const response = await generatePageDesign(request, apiKey.trim(), aiProvider)
       setGenerationStage('validating')
       const result = sanitizeGeneratedDesign(response.design)
@@ -337,12 +406,32 @@ export default function App() {
       <header className="app-header">
         <div className="brand"><div className="brand-mark">H</div><div><strong>主页工坊</strong><span>个人主页生成器</span></div></div>
         <div className="header-actions">
+          <button className="secondary-button design-library-button" type="button" onClick={() => { setNotice(null); setPendingDesignDeleteId(null); setShowDesignLibrary(true) }}><Library size={17} />网页库<span>{designLibrary.length}</span></button>
           <button className="icon-button" type="button" title="恢复示例内容" onClick={resetDraft}><RotateCcw size={18} /></button>
           <button className="primary-button" type="button" onClick={handleExport}><Download size={18} />导出 HTML</button>
         </div>
       </header>
 
       {notice && <div className={`notice ${notice.kind}`} role="status"><span>{notice.message}</span><button className="icon-button" type="button" title="关闭提示" onClick={() => setNotice(null)}><X size={16} /></button></div>}
+      {showDesignLibrary && <div className="modal-backdrop" role="presentation">
+        <section className="ai-confirmation design-library-modal" role="dialog" aria-modal="true" aria-labelledby="design-library-title">
+          <div className="ai-confirmation-header"><div><p className="overline">本机设计来源</p><h2 id="design-library-title">网页库</h2></div><button className="icon-button compact" type="button" title="关闭网页库" onClick={() => { setPendingDesignDeleteId(null); setShowDesignLibrary(false) }}><X size={16} /></button></div>
+          <div className="design-library-toolbar">
+            <div><strong>{designLibrary.length} / {MAX_DESIGN_LIBRARY_ITEMS} 个设计</strong><span>{formatBytes(designLibraryBytes)} / 2MB</span></div>
+            {designLibrary.length < MAX_DESIGN_LIBRARY_ITEMS && <label className="primary-button design-import-button"><Plus size={16} />{isImportingDesign ? '正在提取' : '导入 HTML'}<input type="file" accept={WEB_DESIGN_SOURCE_ACCEPT} multiple disabled={isImportingDesign} onChange={handleDesignSourceInput} /></label>}
+          </div>
+          {designLibrary.length ? <div className="design-library-grid">{designLibrary.map((source) => <article className="design-source-card" key={source.id}>
+            <div className="design-source-preview"><iframe title={`${source.name} 设计预览`} srcDoc={createDesignSourcePreviewHtml(source)} sandbox="" loading="lazy" /></div>
+            <div className="design-source-body">
+              <div className="design-source-heading"><div><strong title={source.name}>{source.name}</strong><span>{source.description}</span></div><button className="icon-button compact danger" type="button" title={`删除 ${source.name}`} onClick={() => setPendingDesignDeleteId(source.id)}><Trash2 size={15} /></button></div>
+              <div className="design-source-tags">{source.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+              {pendingDesignDeleteId === source.id && <div className="design-delete-confirm" role="group" aria-label={`确认删除 ${source.name}`}><span>确认从本机删除？</span><button className="text-button" type="button" onClick={() => setPendingDesignDeleteId(null)}>取消</button><button className="small-button danger" type="button" onClick={() => removeDesignSource(source)}>确认删除</button></div>}
+              <small><FileCode2 size={13} />本机 {formatBytes(source.storageBytes)} · {new Date(source.importedAt).toLocaleDateString('zh-CN')}</small>
+            </div>
+          </article>)}</div> : <div className="design-library-empty"><Library size={28} /><strong>还没有网页设计</strong><span>导入你拥有使用权的单文件 HTML，AI 会从结构与 CSS 中匹配风格。</span><label className="primary-button design-import-button"><Plus size={16} />导入第一个 HTML<input type="file" accept={WEB_DESIGN_SOURCE_ACCEPT} multiple onChange={handleDesignSourceInput} /></label></div>}
+          <p className="ai-confirmation-note design-library-note">网页库只保存在本机。导入时会移除脚本、事件和外链资源；发送给 AI 的 HTML 只保留结构占位，原网页文案仅用于本机预览。生成前仍会列出即将发送的设计文件。</p>
+        </section>
+      </div>}
       {showAiSettings && <div className="modal-backdrop" role="presentation">
         <section className="ai-confirmation ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
           <div className="ai-confirmation-header"><div><p className="overline">会话设置</p><h2 id="ai-settings-title">OpenAI 兼容接口</h2></div><button className="icon-button compact" type="button" title="关闭接口设置" onClick={() => setShowAiSettings(false)}><X size={16} /></button></div>
@@ -366,9 +455,10 @@ export default function App() {
             <div><strong>图片状态</strong><span>仅发送头像和项目是否有图片，不发送头像或项目原图</span></div>
             <div><strong>资料文件</strong><span>{sourceDocuments.length ? sourceDocuments.map((document) => `${document.name}（${formatBytes(document.bytes)}、${document.links.length} 个链接、${document.images.length} 张内嵌图片${document.omittedImages ? `、${document.omittedImages} 张未发送` : ''}）`).join('、') : '未添加'}</span></div>
             <div><strong>参考截图</strong><span>{attachments.length ? attachments.map((item) => `${item.name}（${item.intent === 'reference' ? '参考样例' : '待修改页面'}）`).join('、') : '未添加'}</span></div>
-            <div><strong>修改要求</strong><span>{aiPrompt.trim() || '未填写，将依据资料文件或截图生成'}</span></div>
+            <div><strong>网页库</strong><span>{designLibrary.length ? designLibrary.map((source) => `${source.name}（${formatBytes(source.bytes)}）`).join('、') : '未添加'}</span></div>
+            <div><strong>修改要求</strong><span>{aiPrompt.trim() || '未填写，将依据网页库、资料文件或截图生成'}</span></div>
           </div>
-          <p className="ai-confirmation-note">资料原文件、提取出的链接与 DOCX 图片会发送到上方接口；链接不会被应用主动访问。文件和 API Key 仅在当前运行内存中使用，不写入草稿、日志或生成文件。Responses 请求使用 store: false。</p>
+          <p className="ai-confirmation-note">资料原文件、提取出的链接、DOCX 图片，以及网页库提取后的结构与 CSS 会发送到上方接口；链接不会被应用主动访问。API Key 仅在当前运行内存中使用，Responses 请求使用 store: false。</p>
           <div className="ai-confirmation-actions"><button className="secondary-button" type="button" onClick={() => setShowAiConfirmation(false)}>取消</button><button className="primary-button" type="button" onClick={confirmAiGeneration}><Send size={16} />确认并发送</button></div>
         </section>
       </div>}
@@ -409,7 +499,7 @@ export default function App() {
 
         <section className="preview-panel" aria-label="主页实时预览">
           <div className="preview-toolbar">
-            <div><p className="overline">{candidate ? '候选预览' : '实时预览'}</p><span>{candidate ? '应用前不会修改当前主页' : '导出后与此处一致'}</span></div>
+            <div className="preview-caption"><p className="overline">{candidate ? '候选预览' : '实时预览'}</p><span>{candidate ? '应用前不会修改当前主页' : '导出后与此处一致'}</span>{candidate?.matchReason && <small>{candidateSource ? `匹配「${candidateSource.name}」` : '网页库匹配未启用'} · {candidate.matchReason}</small>}</div>
             <div className="preview-controls">
               {candidate && <div className="candidate-actions">
                 <div className="segmented" aria-label="候选对比"><button className={candidateView === 'current' ? 'active' : ''} type="button" onClick={() => setCandidateView('current')}>当前</button><button className={candidateView === 'candidate' ? 'active' : ''} type="button" onClick={() => setCandidateView('candidate')}>候选</button></div>
@@ -430,7 +520,7 @@ export default function App() {
 
       <section className="ai-panel" aria-label="AI 对话">
         <div className="ai-panel-heading">
-          <div className="ai-panel-title"><span><Sparkles size={18} /></span><div><strong>AI 对话</strong><small>资料、截图与修改要求</small></div></div>
+          <div className="ai-panel-title"><span><Sparkles size={18} /></span><div><strong>AI 对话</strong><small>网页库、资料与修改要求</small></div></div>
           <span className={`ai-connection-state ${apiKey.trim() ? 'ready' : 'local'}`}>{isProcessingDocuments ? '读取资料' : isGenerating ? (generationStage === 'validating' ? '安全检查' : '生成中') : apiKey.trim() ? 'AI 接口就绪' : '本地验收'}</span>
         </div>
         <div className="ai-panel-body">
@@ -467,9 +557,9 @@ export default function App() {
                 <label className="ai-key-field" title="仅保存在当前运行内存"><KeyRound size={14} /><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onPaste={(event) => { event.preventDefault(); setApiKey(event.clipboardData.getData('text').trim()) }} aria-label="OpenAI API Key" autoComplete="off" spellCheck={false} placeholder="API Key（本次运行）" /></label>
                 <button className="icon-button compact ai-paste-key" type="button" title="从剪贴板粘贴 API Key" aria-label="从剪贴板粘贴 API Key" onClick={pasteApiKey}><ClipboardPaste size={15} /></button>
                 <button className="icon-button compact ai-settings-button" type="button" title="配置 OpenAI 兼容接口" onClick={openAiSettings}><Settings2 size={15} /></button>
-                <span>{aiPrompt.length}/2000 · {sourceDocuments.length}/3 文件 · {attachments.length}/3 张</span>
+                <span>{aiPrompt.length}/2000 · {designLibrary.length} 设计 · {sourceDocuments.length}/3 文件 · {attachments.length}/3 张</span>
               </div>
-              <button className="primary-button" type="button" disabled={isGenerating || isProcessingDocuments || (!aiPrompt.trim() && !attachments.length && !sourceDocuments.length)} onClick={handleGenerateCandidate}><Send size={16} />{isGenerating ? generationStage === 'validating' ? '检查中' : '生成中' : apiKey.trim() ? '生成候选' : sourceDocuments.length ? '需要 API' : '本地候选'}</button>
+              <button className="primary-button" type="button" disabled={isGenerating || isProcessingDocuments || (!aiPrompt.trim() && !attachments.length && !sourceDocuments.length && !designLibrary.length)} onClick={handleGenerateCandidate}><Send size={16} />{isGenerating ? generationStage === 'validating' ? '检查中' : '生成中' : apiKey.trim() ? '生成候选' : sourceDocuments.length ? '需要 API' : '本地候选'}</button>
             </div>
           </div>
         </div>
