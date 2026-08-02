@@ -82,11 +82,19 @@ export function normalizeDesignLibrary(candidate: unknown): WebDesignSource[] {
       || source.bytes > MAX_DESIGN_SOURCE_FILE_BYTES
       || source.storageBytes <= 0) continue
 
-    const actualBytes = textEncoder.encode(`${source.bodyHtml}\n${source.css}`).byteLength
-    const actualStorageBytes = textEncoder.encode(`${source.bodyHtml}\n${source.previewHtml}\n${source.css}`).byteLength
-    if (actualBytes !== source.bytes
-      || actualStorageBytes !== source.storageBytes
-      || totalBytes + actualStorageBytes > MAX_DESIGN_LIBRARY_TOTAL_BYTES) continue
+    const persistedBytes = textEncoder.encode(`${source.bodyHtml}\n${source.css}`).byteLength
+    const persistedStorageBytes = textEncoder.encode(`${source.bodyHtml}\n${source.previewHtml}\n${source.css}`).byteLength
+    if (persistedBytes !== source.bytes || persistedStorageBytes !== source.storageBytes) continue
+
+    let css: string
+    try {
+      css = sanitizeReferenceCss(source.css)
+    } catch {
+      continue
+    }
+    const actualBytes = textEncoder.encode(`${source.bodyHtml}\n${css}`).byteLength
+    const actualStorageBytes = textEncoder.encode(`${source.bodyHtml}\n${source.previewHtml}\n${css}`).byteLength
+    if (totalBytes + actualStorageBytes > MAX_DESIGN_LIBRARY_TOTAL_BYTES) continue
     normalized.push({
       id: source.id.slice(0, 120),
       name: source.name.slice(0, 80),
@@ -94,7 +102,7 @@ export function normalizeDesignLibrary(candidate: unknown): WebDesignSource[] {
       tags: source.tags.filter((tag): tag is string => typeof tag === 'string').slice(0, 8).map((tag) => tag.slice(0, 40)),
       bodyHtml: source.bodyHtml,
       previewHtml: source.previewHtml,
-      css: source.css,
+      css,
       importedAt: Number.isNaN(Date.parse(source.importedAt)) ? new Date(0).toISOString() : source.importedAt,
       bytes: actualBytes,
       storageBytes: actualStorageBytes
@@ -178,10 +186,18 @@ function sanitizeReferenceCss(value: string): string {
           blocked = true
         }
       })
+      const serializedValue = generate(node.value).toLowerCase()
+      if ([...BLOCKED_FUNCTIONS].some((name) => serializedValue.includes(`${name}(`))) {
+        blocked = true
+      }
       if (blocked && item && list) list.remove(item)
     }
   })
-  return generate(syntaxTree)
+  const sanitized = generate(syntaxTree)
+  if ([...BLOCKED_FUNCTIONS].some((name) => sanitized.toLowerCase().includes(`${name}(`))) {
+    throw new Error('网页文件中的内嵌 CSS 包含无法安全清理的外链资源。')
+  }
+  return sanitized
 }
 
 function inferDesignTags(body: HTMLElement, css: string): string[] {

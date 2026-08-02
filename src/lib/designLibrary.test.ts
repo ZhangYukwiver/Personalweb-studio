@@ -38,6 +38,47 @@ describe('web design library', () => {
     expect(normalizeDesignLibrary(JSON.parse(JSON.stringify([source])))).toEqual([source])
   })
 
+  it('removes SingleFile image variables and other raw URL values', async () => {
+    const file = new File([`<!doctype html><html><head><style>
+      :root { --sf-img-1: url("data:image/png;base64,c2VjcmV0"); --accent: #0f766e; }
+      .hero { background-image: var(--sf-img-1); color: var(--accent); }
+      .label::before { content: "url("; }
+    </style></head><body><main class="hero"><h1>作品集</h1></main></body></html>`], 'singlefile.html', { type: 'text/html' })
+
+    const source = await prepareWebDesignSource(file, 'design-singlefile')
+
+    expect(source.css).not.toContain('url(')
+    expect(source.css).not.toContain('c2VjcmV0')
+    expect(source.css).toMatch(/--accent:\s*#0f766e/)
+    expect(source.css).toContain('color:var(--accent)')
+  })
+
+  it('migrates previously stored CSS through the current sanitizer', () => {
+    const bodyHtml = '<main><h1>标题</h1></main>'
+    const previewHtml = '<main><h1>作品集</h1></main>'
+    const css = ':root{--sf-img:url("data:image/png;base64,c2VjcmV0");--accent:#0f766e}.hero{color:var(--accent)}'
+    const encoder = new TextEncoder()
+    const persisted = {
+      id: 'design-stored',
+      name: '旧网页设计',
+      description: '已保存在本机',
+      tags: ['网页设计'],
+      bodyHtml,
+      previewHtml,
+      css,
+      importedAt: '2026-08-02T00:00:00.000Z',
+      bytes: encoder.encode(`${bodyHtml}\n${css}`).byteLength,
+      storageBytes: encoder.encode(`${bodyHtml}\n${previewHtml}\n${css}`).byteLength
+    }
+
+    const [migrated] = normalizeDesignLibrary([persisted])
+
+    expect(migrated.css).not.toContain('url(')
+    expect(migrated.css).toMatch(/--accent:\s*#0f766e/)
+    expect(migrated.bytes).toBeLessThan(persisted.bytes)
+    expect(migrated.storageBytes).toBeLessThan(persisted.storageBytes)
+  })
+
   it('rejects unsupported files and ignores malformed persisted entries', () => {
     expect(designSourceFileError(new File(['x'], 'reference.txt'))).toContain('.html')
     expect(normalizeDesignLibrary([{ id: 'broken' }])).toEqual([])
