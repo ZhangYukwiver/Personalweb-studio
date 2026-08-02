@@ -1,11 +1,17 @@
-import { useEffect, useMemo, useState, type ChangeEvent, type ReactNode } from 'react'
-import { Download, FileDown, ImagePlus, Mail, Monitor, MoveDown, MoveUp, Palette, Plus, RotateCcw, Smartphone, Trash2, Upload, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState, type ChangeEvent, type DragEvent, type ReactNode } from 'react'
+import { Check, ClipboardPaste, Download, FileCode2, FileDown, FileText, ImagePlus, KeyRound, Library, Mail, Monitor, MoveDown, MoveUp, Palette, Plus, RefreshCw, RotateCcw, Send, Settings2, Sparkles, Smartphone, Trash2, Upload, X } from 'lucide-react'
 import { createDefaultPortfolio, normalizePortfolio, STORAGE_KEY } from './defaults'
+import { aiEndpoint, compressAiImage, createAiGenerationRequest, createCandidatePortfolio, createCurrentProfileCandidate, DEFAULT_AI_PROVIDER, generatePageDesign } from './lib/aiGeneration'
+import { createDesignSourcePreviewHtml, DESIGN_LIBRARY_STORAGE_KEY, designSourceFileError, MAX_DESIGN_LIBRARY_ITEMS, MAX_DESIGN_LIBRARY_TOTAL_BYTES, normalizeDesignLibrary, prepareWebDesignSource, WEB_DESIGN_SOURCE_ACCEPT } from './lib/designLibrary'
+import { createImmersiveGeneratedDesign, sanitizeGeneratedDesign } from './lib/generatedPage'
 import { createPortfolioHtml, exportFileName, initials, isValidImage, joinTags, readImage, splitTags } from './lib/portfolio'
-import type { PortfolioData, Project, SocialLink, TemplateId } from './types'
+import { formatBytes, MAX_SOURCE_DOCUMENTS, MAX_SOURCE_DOCUMENT_TOTAL_BYTES, prepareAiSourceDocument, SOURCE_DOCUMENT_ACCEPT, sourceDocumentError } from './lib/sourceDocuments'
+import type { AiAttachment, AiGenerationCandidate, AiProviderConfig, AiSourceDocument, PortfolioData, Project, SocialLink, TemplateId, WebDesignSource } from './types'
 
 type Notice = { kind: 'success' | 'error'; message: string } | null
-const TEMPLATE_OPTIONS: { id: TemplateId; label: string }[] = [
+type ImageIntent = 'reference' | 'target'
+type GenerationStage = 'idle' | 'sending' | 'validating'
+const TEMPLATE_OPTIONS: { id: Exclude<TemplateId, 'generated'>; label: string }[] = [
   { id: 'professional', label: '清爽专业' },
   { id: 'creative', label: '创意作品集' },
   { id: 'resume', label: '极简履历' }
@@ -22,6 +28,15 @@ function loadDraft(): PortfolioData {
     return normalizePortfolio(JSON.parse(saved))
   } catch {
     return createDefaultPortfolio()
+  }
+}
+
+function loadDesignLibrary(): WebDesignSource[] {
+  try {
+    const saved = localStorage.getItem(DESIGN_LIBRARY_STORAGE_KEY)
+    return saved ? normalizeDesignLibrary(JSON.parse(saved)) : []
+  } catch {
+    return []
   }
 }
 
@@ -57,8 +72,28 @@ async function saveExport(content: string, filename: string): Promise<void> {
 
 export default function App() {
   const [data, setData] = useState<PortfolioData>(loadDraft)
+  const [designLibrary, setDesignLibrary] = useState<WebDesignSource[]>(loadDesignLibrary)
   const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop')
   const [notice, setNotice] = useState<Notice>(null)
+  const [aiPrompt, setAiPrompt] = useState('')
+  const [attachments, setAttachments] = useState<AiAttachment[]>([])
+  const [sourceDocuments, setSourceDocuments] = useState<AiSourceDocument[]>([])
+  const [imageIntent, setImageIntent] = useState<ImageIntent>('reference')
+  const [isDraggingImage, setIsDraggingImage] = useState(false)
+  const [isProcessingDocuments, setIsProcessingDocuments] = useState(false)
+  const [candidate, setCandidate] = useState<AiGenerationCandidate | null>(null)
+  const [candidateView, setCandidateView] = useState<'current' | 'candidate'>('current')
+  const [isGenerating, setIsGenerating] = useState(false)
+  const [apiKey, setApiKey] = useState('')
+  const [aiProvider, setAiProvider] = useState<AiProviderConfig>(() => ({ ...DEFAULT_AI_PROVIDER }))
+  const [aiProviderDraft, setAiProviderDraft] = useState<AiProviderConfig>(() => ({ ...DEFAULT_AI_PROVIDER }))
+  const [showAiSettings, setShowAiSettings] = useState(false)
+  const [showAiConfirmation, setShowAiConfirmation] = useState(false)
+  const [showDesignLibrary, setShowDesignLibrary] = useState(false)
+  const [isImportingDesign, setIsImportingDesign] = useState(false)
+  const [pendingDesignDeleteId, setPendingDesignDeleteId] = useState<string | null>(null)
+  const [generationStage, setGenerationStage] = useState<GenerationStage>('idle')
+  const previewStageRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     try {
@@ -68,9 +103,33 @@ export default function App() {
     }
   }, [data])
 
+  useEffect(() => {
+    try {
+      localStorage.setItem(DESIGN_LIBRARY_STORAGE_KEY, JSON.stringify(designLibrary))
+    } catch {
+      setNotice({ kind: 'error', message: '网页库超出本机存储空间，请删除较大的设计后重试。' })
+    }
+  }, [designLibrary])
+
   const updateData = (patch: Partial<PortfolioData>) => setData((previous) => ({ ...previous, ...patch }))
+  const candidateData = useMemo(() => candidate ? createCandidatePortfolio(data, candidate) : null, [candidate, data])
+  const previewData = candidateData && candidateView === 'candidate' ? candidateData : data
+  const generatedPreview = previewData.templateId === 'generated'
   const exportHtml = useMemo(() => createPortfolioHtml(data), [data])
-  const previewHtml = useMemo(() => createPortfolioHtml(data, { preview: true }), [data])
+  const previewHtml = useMemo(() => createPortfolioHtml(previewData, { preview: true }), [previewData])
+  const candidateSource = candidate ? designLibrary.find((source) => source.id === candidate.sourceDesignId) : undefined
+  const designLibraryBytes = designLibrary.reduce((total, source) => total + source.storageBytes, 0)
+
+  useEffect(() => {
+    if (generatedPreview && previewMode === 'mobile') setPreviewMode('desktop')
+  }, [generatedPreview, previewMode])
+
+  useEffect(() => {
+    if (previewStageRef.current) {
+      previewStageRef.current.scrollTop = 0
+      previewStageRef.current.scrollLeft = 0
+    }
+  }, [candidate?.design.createdAt, candidateView, data.templateId, previewMode])
 
   async function handleExport() {
     if (!data.name.trim()) {
@@ -99,17 +158,310 @@ export default function App() {
     updateData({ avatar: await readImage(file) })
   }
 
+  async function updateAttachments(files: File[]) {
+    const remaining = 3 - attachments.length
+    if (remaining <= 0) {
+      setNotice({ kind: 'error', message: '最多添加 3 张截图。' })
+      return
+    }
+    const selected = files.slice(0, remaining)
+    if (selected.some((file) => !isValidImage(file))) {
+      setNotice({ kind: 'error', message: '请上传单张 4MB 以内的图片文件。' })
+      return
+    }
+    try {
+      const compressed = await Promise.all(selected.map(compressAiImage))
+      const currentBytes = attachments.reduce((total, item) => total + item.bytes, 0)
+      if (currentBytes + compressed.reduce((total, item) => total + item.bytes, 0) > 8 * 1024 * 1024) {
+        setNotice({ kind: 'error', message: '截图压缩后的总大小不能超过 8MB。' })
+        return
+      }
+      const next = selected.map((file, index) => ({
+        id: createId('attachment'),
+        name: file.name,
+        src: compressed[index].src,
+        intent: imageIntent,
+        bytes: compressed[index].bytes
+      } satisfies AiAttachment))
+      setAttachments((previous) => [...previous, ...next])
+    } catch {
+      setNotice({ kind: 'error', message: '截图压缩失败，请重新选择图片。' })
+    }
+  }
+
+  async function handleImageInput(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    await updateAttachments(files)
+  }
+
+  async function handleImageDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault()
+    setIsDraggingImage(false)
+    await updateAttachments(Array.from(event.dataTransfer.files))
+  }
+
+  async function handleDocumentInput(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    if (!files.length) return
+    const remaining = MAX_SOURCE_DOCUMENTS - sourceDocuments.length
+    if (remaining <= 0 || files.length > remaining) {
+      setNotice({ kind: 'error', message: '最多添加 3 个资料文件。' })
+      return
+    }
+    const invalid = files.map(sourceDocumentError).find(Boolean)
+    if (invalid) {
+      setNotice({ kind: 'error', message: invalid })
+      return
+    }
+    const currentBytes = sourceDocuments.reduce((total, document) => total + document.bytes, 0)
+    if (currentBytes + files.reduce((total, file) => total + file.size, 0) > MAX_SOURCE_DOCUMENT_TOTAL_BYTES) {
+      setNotice({ kind: 'error', message: '资料文件总大小不能超过 20MB。' })
+      return
+    }
+
+    setIsProcessingDocuments(true)
+    try {
+      const next: AiSourceDocument[] = []
+      for (const file of files) {
+        next.push(await prepareAiSourceDocument(file, createId('document')))
+      }
+      setSourceDocuments((previous) => [...previous, ...next])
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      setIsProcessingDocuments(false)
+    }
+  }
+
+  async function handleDesignSourceInput(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.target.files ?? [])
+    event.target.value = ''
+    if (!files.length) return
+    const remaining = MAX_DESIGN_LIBRARY_ITEMS - designLibrary.length
+    if (remaining <= 0 || files.length > remaining) {
+      setNotice({ kind: 'error', message: `网页库最多保存 ${MAX_DESIGN_LIBRARY_ITEMS} 个设计。` })
+      return
+    }
+    const invalid = files.map(designSourceFileError).find(Boolean)
+    if (invalid) {
+      setNotice({ kind: 'error', message: invalid })
+      return
+    }
+
+    setIsImportingDesign(true)
+    try {
+      const next: WebDesignSource[] = []
+      let nextBytes = designLibraryBytes
+      for (const file of files) {
+        const source = await prepareWebDesignSource(file, createId('design'))
+        nextBytes += source.storageBytes
+        if (nextBytes > MAX_DESIGN_LIBRARY_TOTAL_BYTES) {
+          throw new Error('网页库提取后的 HTML 与 CSS 总计不能超过 2MB。')
+        }
+        next.push(source)
+      }
+      setDesignLibrary((previous) => [...next, ...previous])
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      setIsImportingDesign(false)
+    }
+  }
+
+  function removeDesignSource(source: WebDesignSource) {
+    setDesignLibrary((previous) => previous.filter((item) => item.id !== source.id))
+    setPendingDesignDeleteId(null)
+  }
+
+  function handleGenerateCandidate() {
+    if (!aiPrompt.trim() && !attachments.length && !sourceDocuments.length && !designLibrary.length) {
+      setNotice({ kind: 'error', message: '请添加网页设计、资料文件、参考截图或填写修改要求。' })
+      return
+    }
+    if (isGenerating || isProcessingDocuments) return
+    if (sourceDocuments.length && !apiKey.trim()) {
+      setNotice({ kind: 'error', message: '使用资料文件需要填写 API Key，文件不会进入本地候选。' })
+      return
+    }
+    if (sourceDocuments.length && aiProvider.apiFormat !== 'responses') {
+      setNotice({ kind: 'error', message: '资料文件仅支持 Responses API，请在接口设置中切换后重试。' })
+      return
+    }
+    if (apiKey.trim()) {
+      try {
+        aiEndpoint(aiProvider)
+      } catch (error) {
+        setNotice({ kind: 'error', message: errorMessage(error) })
+        return
+      }
+      setShowAiConfirmation(true)
+      return
+    }
+    generateLocalCandidate()
+  }
+
+  function generateLocalCandidate() {
+    setIsGenerating(true)
+    try {
+      const result = sanitizeGeneratedDesign(createImmersiveGeneratedDesign())
+      setCandidate({
+        design: result.design,
+        profile: createCurrentProfileCandidate(data),
+        sourceDesignId: '',
+        matchReason: designLibrary.length ? '本地验收未调用 AI，配置接口后将自动匹配网页库。' : ''
+      })
+      setCandidateView('candidate')
+      setPreviewMode('desktop')
+      setNotice({ kind: 'success', message: '已生成本地候选，确认应用前不会修改当前主页。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: error instanceof Error ? error.message : '候选页面生成失败。' })
+    } finally {
+      setIsGenerating(false)
+    }
+  }
+
+  async function confirmAiGeneration() {
+    setShowAiConfirmation(false)
+    setIsGenerating(true)
+    setGenerationStage('sending')
+    try {
+      const request = createAiGenerationRequest(data, aiPrompt, attachments, sourceDocuments, designLibrary)
+      const response = await generatePageDesign(request, apiKey.trim(), aiProvider)
+      setGenerationStage('validating')
+      const result = sanitizeGeneratedDesign(response.design)
+      setCandidate({ ...response, design: result.design })
+      setCandidateView('candidate')
+      setPreviewMode('desktop')
+      setNotice({
+        kind: 'success',
+        message: result.warnings.length
+          ? `AI 候选已生成，并安全清理了 ${result.warnings.length} 处不受支持内容。`
+          : 'AI 候选已生成，确认应用前不会修改当前主页。'
+      })
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    } finally {
+      setGenerationStage('idle')
+      setIsGenerating(false)
+    }
+  }
+
+  function openAiSettings() {
+    setAiProviderDraft({ ...aiProvider })
+    setShowAiSettings(true)
+  }
+
+  async function pasteApiKey() {
+    try {
+      const clipboardText = await navigator.clipboard.readText()
+      const nextKey = clipboardText.trim()
+      if (!nextKey) {
+        setNotice({ kind: 'error', message: '剪贴板中没有可用的 API Key。' })
+        return
+      }
+      setApiKey(nextKey)
+    } catch {
+      setNotice({ kind: 'error', message: '无法读取系统剪贴板，请点击输入框后使用 Command+V。' })
+    }
+  }
+
+  function saveAiSettings() {
+    try {
+      if (sourceDocuments.length && aiProviderDraft.apiFormat !== 'responses') {
+        throw new Error('已添加资料文件，请保持使用 Responses API。')
+      }
+      aiEndpoint(aiProviderDraft)
+      setAiProvider({ ...aiProviderDraft, baseUrl: aiProviderDraft.baseUrl.trim(), model: aiProviderDraft.model.trim() })
+      setShowAiSettings(false)
+      setNotice({ kind: 'success', message: 'AI 接口设置已更新，仅在当前运行中有效。' })
+    } catch (error) {
+      setNotice({ kind: 'error', message: errorMessage(error) })
+    }
+  }
+
+  function applyCandidate() {
+    if (!candidate) return
+    setData(createCandidatePortfolio(data, candidate))
+    setCandidate(null)
+    setCandidateView('current')
+    setPreviewMode('desktop')
+    setNotice({ kind: 'success', message: 'AI 候选已应用，可继续编辑资料或导出。' })
+  }
+
+  function discardCandidate() {
+    setCandidate(null)
+    setCandidateView('current')
+    setNotice({ kind: 'success', message: '已放弃候选，当前主页没有变化。' })
+  }
+
+  function selectTemplate(templateId: TemplateId) {
+    updateData({ templateId })
+    if (templateId === 'generated') setPreviewMode('desktop')
+  }
+
   return (
     <div className="app-shell">
       <header className="app-header">
         <div className="brand"><div className="brand-mark">H</div><div><strong>主页工坊</strong><span>个人主页生成器</span></div></div>
         <div className="header-actions">
+          <button className="secondary-button design-library-button" type="button" onClick={() => { setNotice(null); setPendingDesignDeleteId(null); setShowDesignLibrary(true) }}><Library size={17} />网页库<span>{designLibrary.length}</span></button>
           <button className="icon-button" type="button" title="恢复示例内容" onClick={resetDraft}><RotateCcw size={18} /></button>
           <button className="primary-button" type="button" onClick={handleExport}><Download size={18} />导出 HTML</button>
         </div>
       </header>
 
       {notice && <div className={`notice ${notice.kind}`} role="status"><span>{notice.message}</span><button className="icon-button" type="button" title="关闭提示" onClick={() => setNotice(null)}><X size={16} /></button></div>}
+      {showDesignLibrary && <div className="modal-backdrop" role="presentation">
+        <section className="ai-confirmation design-library-modal" role="dialog" aria-modal="true" aria-labelledby="design-library-title">
+          <div className="ai-confirmation-header"><div><p className="overline">本机设计来源</p><h2 id="design-library-title">网页库</h2></div><button className="icon-button compact" type="button" title="关闭网页库" onClick={() => { setPendingDesignDeleteId(null); setShowDesignLibrary(false) }}><X size={16} /></button></div>
+          <div className="design-library-toolbar">
+            <div><strong>{designLibrary.length} / {MAX_DESIGN_LIBRARY_ITEMS} 个设计</strong><span>{formatBytes(designLibraryBytes)} / 2MB</span></div>
+            {designLibrary.length < MAX_DESIGN_LIBRARY_ITEMS && <label className="primary-button design-import-button"><Plus size={16} />{isImportingDesign ? '正在提取' : '导入 HTML'}<input type="file" accept={WEB_DESIGN_SOURCE_ACCEPT} multiple disabled={isImportingDesign} onChange={handleDesignSourceInput} /></label>}
+          </div>
+          {designLibrary.length ? <div className="design-library-grid">{designLibrary.map((source) => <article className="design-source-card" key={source.id}>
+            <div className="design-source-preview"><iframe title={`${source.name} 设计预览`} srcDoc={createDesignSourcePreviewHtml(source)} sandbox="" loading="lazy" /></div>
+            <div className="design-source-body">
+              <div className="design-source-heading"><div><strong title={source.name}>{source.name}</strong><span>{source.description}</span></div><button className="icon-button compact danger" type="button" title={`删除 ${source.name}`} onClick={() => setPendingDesignDeleteId(source.id)}><Trash2 size={15} /></button></div>
+              <div className="design-source-tags">{source.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+              {pendingDesignDeleteId === source.id && <div className="design-delete-confirm" role="group" aria-label={`确认删除 ${source.name}`}><span>确认从本机删除？</span><button className="text-button" type="button" onClick={() => setPendingDesignDeleteId(null)}>取消</button><button className="small-button danger" type="button" onClick={() => removeDesignSource(source)}>确认删除</button></div>}
+              <small><FileCode2 size={13} />本机 {formatBytes(source.storageBytes)} · {new Date(source.importedAt).toLocaleDateString('zh-CN')}</small>
+            </div>
+          </article>)}</div> : <div className="design-library-empty"><Library size={28} /><strong>还没有网页设计</strong><span>导入你拥有使用权的单文件 HTML，AI 会从结构与 CSS 中匹配风格。</span><label className="primary-button design-import-button"><Plus size={16} />导入第一个 HTML<input type="file" accept={WEB_DESIGN_SOURCE_ACCEPT} multiple onChange={handleDesignSourceInput} /></label></div>}
+          <p className="ai-confirmation-note design-library-note">网页库只保存在本机。导入时会移除脚本、事件和外链资源；发送给 AI 的 HTML 只保留结构占位，原网页文案仅用于本机预览。生成前仍会列出即将发送的设计文件。</p>
+        </section>
+      </div>}
+      {showAiSettings && <div className="modal-backdrop" role="presentation">
+        <section className="ai-confirmation ai-settings-modal" role="dialog" aria-modal="true" aria-labelledby="ai-settings-title">
+          <div className="ai-confirmation-header"><div><p className="overline">会话设置</p><h2 id="ai-settings-title">OpenAI 兼容接口</h2></div><button className="icon-button compact" type="button" title="关闭接口设置" onClick={() => setShowAiSettings(false)}><X size={16} /></button></div>
+          <div className="ai-settings-fields">
+            <div className="ai-setting-field"><span>接口格式</span><div className="segmented ai-api-format" aria-label="接口格式"><button className={aiProviderDraft.apiFormat === 'responses' ? 'active' : ''} type="button" onClick={() => setAiProviderDraft((previous) => ({ ...previous, apiFormat: 'responses' }))}>Responses</button><button className={aiProviderDraft.apiFormat === 'chatCompletions' ? 'active' : ''} type="button" onClick={() => setAiProviderDraft((previous) => ({ ...previous, apiFormat: 'chatCompletions' }))}>Chat Completions</button></div></div>
+            <label className="ai-setting-field"><span>API Base URL</span><input value={aiProviderDraft.baseUrl} onChange={(event) => setAiProviderDraft((previous) => ({ ...previous, baseUrl: event.target.value }))} aria-label="API Base URL" autoComplete="off" spellCheck={false} placeholder="https://api.example.com/v1" /><small>可填写 Base URL 或所选格式的完整接口地址</small></label>
+            <label className="ai-setting-field"><span>模型名称</span><input value={aiProviderDraft.model} onChange={(event) => setAiProviderDraft((previous) => ({ ...previous, model: event.target.value }))} aria-label="模型名称" autoComplete="off" spellCheck={false} placeholder="gpt-5.6-sol" /></label>
+          </div>
+          <p className="ai-confirmation-note">支持 Responses 与 Chat Completions；资料文件仅支持 Responses。公网地址必须使用 HTTPS；HTTP 只允许连接本机服务。设置和 API Key 都不会写入草稿。</p>
+          <div className="ai-confirmation-actions"><button className="text-button ai-default-provider" type="button" onClick={() => setAiProviderDraft({ ...DEFAULT_AI_PROVIDER })}>恢复项目默认</button><span /><button className="secondary-button" type="button" onClick={() => setShowAiSettings(false)}>取消</button><button className="primary-button" type="button" onClick={saveAiSettings}><Check size={16} />保存设置</button></div>
+        </section>
+      </div>}
+      {showAiConfirmation && <div className="modal-backdrop" role="presentation">
+        <section className="ai-confirmation" role="dialog" aria-modal="true" aria-labelledby="ai-confirmation-title">
+          <div className="ai-confirmation-header"><div><p className="overline">发送前确认</p><h2 id="ai-confirmation-title">确认交给 AI 服务的内容</h2></div><button className="icon-button compact" type="button" title="取消发送" onClick={() => setShowAiConfirmation(false)}><X size={16} /></button></div>
+          <div className="ai-confirmation-list">
+            <div><strong>接口格式</strong><span>{aiProvider.apiFormat === 'responses' ? 'Responses API' : 'Chat Completions'}</span></div>
+            <div><strong>接口地址</strong><span>{aiEndpoint(aiProvider)}</span></div>
+            <div><strong>模型</strong><span>{aiProvider.model}</span></div>
+            <div><strong>个人资料</strong><span>姓名、标题、简介、技能、邮箱、所在地、社交链接和项目文字</span></div>
+            <div><strong>图片状态</strong><span>仅发送头像和项目是否有图片，不发送头像或项目原图</span></div>
+            <div><strong>资料文件</strong><span>{sourceDocuments.length ? sourceDocuments.map((document) => `${document.name}（${formatBytes(document.bytes)}、${document.links.length} 个链接、${document.images.length} 张内嵌图片${document.omittedImages ? `、${document.omittedImages} 张未发送` : ''}）`).join('、') : '未添加'}</span></div>
+            <div><strong>参考截图</strong><span>{attachments.length ? attachments.map((item) => `${item.name}（${item.intent === 'reference' ? '参考样例' : '待修改页面'}）`).join('、') : '未添加'}</span></div>
+            <div><strong>网页库</strong><span>{designLibrary.length ? designLibrary.map((source) => `${source.name}（${formatBytes(source.bytes)}）`).join('、') : '未添加'}</span></div>
+            <div><strong>修改要求</strong><span>{aiPrompt.trim() || '未填写，将依据网页库、资料文件或截图生成'}</span></div>
+          </div>
+          <p className="ai-confirmation-note">资料原文件、提取出的链接、DOCX 图片，以及网页库提取后的结构与 CSS 会发送到上方接口；链接不会被应用主动访问。API Key 仅在当前运行内存中使用，Responses 请求使用 store: false。</p>
+          <div className="ai-confirmation-actions"><button className="secondary-button" type="button" onClick={() => setShowAiConfirmation(false)}>取消</button><button className="primary-button" type="button" onClick={confirmAiGeneration}><Send size={16} />确认并发送</button></div>
+        </section>
+      </div>}
 
       <main className="workspace">
         <aside className="editor-panel" aria-label="主页内容编辑器">
@@ -147,19 +499,79 @@ export default function App() {
 
         <section className="preview-panel" aria-label="主页实时预览">
           <div className="preview-toolbar">
-            <div><p className="overline">实时预览</p><span>导出后与此处一致</span></div>
+            <div className="preview-caption"><p className="overline">{candidate ? '候选预览' : '实时预览'}</p><span>{candidate ? '应用前不会修改当前主页' : '导出后与此处一致'}</span>{candidate?.matchReason && <small>{candidateSource ? `匹配「${candidateSource.name}」` : '网页库匹配未启用'} · {candidate.matchReason}</small>}</div>
             <div className="preview-controls">
+              {candidate && <div className="candidate-actions">
+                <div className="segmented" aria-label="候选对比"><button className={candidateView === 'current' ? 'active' : ''} type="button" onClick={() => setCandidateView('current')}>当前</button><button className={candidateView === 'candidate' ? 'active' : ''} type="button" onClick={() => setCandidateView('candidate')}>候选</button></div>
+                <button className="small-button" type="button" onClick={applyCandidate}><Check size={15} />应用</button>
+                <button className="icon-button compact" type="button" title="重新生成候选" onClick={handleGenerateCandidate}><RefreshCw size={15} /></button>
+                <button className="icon-button compact danger" type="button" title="放弃候选" onClick={discardCandidate}><X size={15} /></button>
+              </div>}
               <div className="segmented template-switch" aria-label="网页样式">
-                {TEMPLATE_OPTIONS.map((template) => <button className={data.templateId === template.id ? 'active' : ''} type="button" key={template.id} onClick={() => updateData({ templateId: template.id })}>{template.label}</button>)}
+                {TEMPLATE_OPTIONS.map((template) => <button className={!candidate && data.templateId === template.id ? 'active' : ''} type="button" key={template.id} onClick={() => selectTemplate(template.id)}>{template.label}</button>)}
+                {data.generatedDesign && <button className={!candidate && data.templateId === 'generated' ? 'active' : ''} type="button" onClick={() => selectTemplate('generated')}>AI 生成</button>}
               </div>
-              <div className="segmented" aria-label="预览尺寸"><button className={previewMode === 'desktop' ? 'active' : ''} type="button" title="桌面预览" onClick={() => setPreviewMode('desktop')}><Monitor size={16} /><span>桌面</span></button><button className={previewMode === 'mobile' ? 'active' : ''} type="button" title="手机预览" onClick={() => setPreviewMode('mobile')}><Smartphone size={16} /><span>手机</span></button></div>
+              <div className="segmented" aria-label="预览尺寸"><button className={previewMode === 'desktop' ? 'active' : ''} type="button" title="桌面预览" onClick={() => setPreviewMode('desktop')}><Monitor size={16} /><span>桌面</span></button><button className={previewMode === 'mobile' ? 'active' : ''} type="button" title={generatedPreview ? 'AI 生成页面首版仅支持桌面预览' : '手机预览'} disabled={generatedPreview} onClick={() => setPreviewMode('mobile')}><Smartphone size={16} /><span>手机</span></button></div>
             </div>
           </div>
-          <div className="preview-stage"><iframe key={previewMode} className={`preview-frame ${previewMode}`} title={`${TEMPLATE_OPTIONS.find((template) => template.id === data.templateId)?.label ?? '主页'}预览`} srcDoc={previewHtml} sandbox="allow-popups" /></div>
+          <div className="preview-stage" ref={previewStageRef}><iframe key={`${previewMode}-${candidateView}-${previewData.templateId}`} className={`preview-frame ${previewMode}`} title={`${previewData.templateId === 'generated' ? 'AI 生成' : TEMPLATE_OPTIONS.find((template) => template.id === previewData.templateId)?.label ?? '主页'}预览`} srcDoc={previewHtml} sandbox="allow-scripts allow-popups" /></div>
         </section>
       </main>
+
+      <section className="ai-panel" aria-label="AI 对话">
+        <div className="ai-panel-heading">
+          <div className="ai-panel-title"><span><Sparkles size={18} /></span><div><strong>AI 对话</strong><small>网页库、资料与修改要求</small></div></div>
+          <span className={`ai-connection-state ${apiKey.trim() ? 'ready' : 'local'}`}>{isProcessingDocuments ? '读取资料' : isGenerating ? (generationStage === 'validating' ? '安全检查' : '生成中') : apiKey.trim() ? 'AI 接口就绪' : '本地验收'}</span>
+        </div>
+        <div className="ai-panel-body">
+          <div className="ai-source-input">
+            <div className="ai-input-heading"><strong>资料文件</strong><span>PDF / DOCX / TXT</span></div>
+            <div className="ai-document-box">
+              {sourceDocuments.length ? <div className="ai-documents">{sourceDocuments.map((document) => <div className="ai-document" key={document.id}>
+                <FileText size={17} />
+                <div className="ai-document-meta"><strong title={document.name}>{document.name}</strong><span>{formatBytes(document.bytes)} · {document.links.length} 链接 · {document.images.length} 图片{document.omittedImages ? ` · ${document.omittedImages} 未发送` : ''}</span></div>
+                <button className="icon-button compact danger" type="button" title="移除资料文件" onClick={() => setSourceDocuments((previous) => previous.filter((item) => item.id !== document.id))}><Trash2 size={15} /></button>
+              </div>)}</div> : <div className="ai-document-empty"><FileText size={20} /><div><strong>{isProcessingDocuments ? '正在读取资料' : '添加资料文件'}</strong><span>最多 3 个，总计 20MB</span></div></div>}
+              {sourceDocuments.length < MAX_SOURCE_DOCUMENTS && <label className={sourceDocuments.length ? 'icon-button compact ai-add-document' : 'ai-document-hitarea'} title={sourceDocuments.length ? '继续添加资料文件' : '添加资料文件'}>{sourceDocuments.length ? <Plus size={15} /> : null}<input type="file" accept={SOURCE_DOCUMENT_ACCEPT} multiple disabled={isProcessingDocuments} aria-label="上传资料文件" onChange={handleDocumentInput} /></label>}
+            </div>
+          </div>
+          <div className="ai-image-input">
+            <div className="segmented ai-image-intent" aria-label="图片用途">
+              <button className={imageIntent === 'reference' ? 'active' : ''} type="button" onClick={() => setImageIntent('reference')}>参考样例</button>
+              <button className={imageIntent === 'target' ? 'active' : ''} type="button" onClick={() => setImageIntent('target')}>待修改页面</button>
+            </div>
+            <div className={`ai-screenshot ${isDraggingImage ? 'dragging' : ''}`} onDragEnter={() => setIsDraggingImage(true)} onDragLeave={() => setIsDraggingImage(false)} onDragOver={(event) => event.preventDefault()} onDrop={handleImageDrop}>
+              {attachments.length ? <div className="ai-attachments">{attachments.map((attachment) => <div className="ai-attachment" key={attachment.id}>
+                <img src={attachment.src} alt="上传图片预览" />
+                <div className="ai-screenshot-meta"><strong title={attachment.name}>{attachment.name}</strong><span>{attachment.intent === 'reference' ? '参考样例' : '待修改页面'}</span></div>
+                <button className="icon-button compact danger" type="button" title="移除图片" onClick={() => setAttachments((previous) => previous.filter((item) => item.id !== attachment.id))}><Trash2 size={15} /></button>
+              </div>)}</div> : <div className="ai-screenshot-empty"><ImagePlus size={20} /><div><strong>添加图片</strong><span>选择或拖入图片</span></div></div>}
+              {attachments.length < 3 && <label className="icon-button compact ai-add-image" title="继续添加图片"><Plus size={15} /><input type="file" accept="image/*" multiple onChange={handleImageInput} /></label>}
+              {!attachments.length && <label className="ai-screenshot-hitarea"><input type="file" accept="image/*" multiple onChange={handleImageInput} /></label>}
+            </div>
+          </div>
+          <div className="ai-composer">
+            <textarea value={aiPrompt} maxLength={2000} onChange={(event) => setAiPrompt(event.target.value)} aria-label="修改要求" placeholder="补充资料重点，或描述希望调整的版式、颜色与章节节奏" />
+            <div className="ai-composer-footer">
+              <div className="ai-composer-meta">
+                <label className="ai-key-field" title="仅保存在当前运行内存"><KeyRound size={14} /><input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} onPaste={(event) => { event.preventDefault(); setApiKey(event.clipboardData.getData('text').trim()) }} aria-label="OpenAI API Key" autoComplete="off" spellCheck={false} placeholder="API Key（本次运行）" /></label>
+                <button className="icon-button compact ai-paste-key" type="button" title="从剪贴板粘贴 API Key" aria-label="从剪贴板粘贴 API Key" onClick={pasteApiKey}><ClipboardPaste size={15} /></button>
+                <button className="icon-button compact ai-settings-button" type="button" title="配置 OpenAI 兼容接口" onClick={openAiSettings}><Settings2 size={15} /></button>
+                <span>{aiPrompt.length}/2000 · {designLibrary.length} 设计 · {sourceDocuments.length}/3 文件 · {attachments.length}/3 张</span>
+              </div>
+              <button className="primary-button" type="button" disabled={isGenerating || isProcessingDocuments || (!aiPrompt.trim() && !attachments.length && !sourceDocuments.length && !designLibrary.length)} onClick={handleGenerateCandidate}><Send size={16} />{isGenerating ? generationStage === 'validating' ? '检查中' : '生成中' : apiKey.trim() ? '生成候选' : sourceDocuments.length ? '需要 API' : '本地候选'}</button>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   )
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (typeof error === 'string' && error.trim()) return error
+  return '候选页面生成失败。'
 }
 
 function moveItem<T>(items: T[], index: number, offset: number, update: (items: T[]) => void) {

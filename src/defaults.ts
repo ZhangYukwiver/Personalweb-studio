@@ -1,7 +1,7 @@
 import type { PortfolioData, TemplateId } from './types'
 
 export const STORAGE_KEY = 'portfolio-forge-draft-v1'
-export const TEMPLATE_IDS: TemplateId[] = ['professional', 'creative', 'resume']
+export const TEMPLATE_IDS: TemplateId[] = ['professional', 'creative', 'resume', 'generated']
 
 export const defaultPortfolio: PortfolioData = {
   name: '林予安',
@@ -45,12 +45,23 @@ export function normalizePortfolio(candidate: unknown): PortfolioData {
   const saved = candidate as Partial<PortfolioData>
   if (typeof saved.name !== 'string' || !Array.isArray(saved.projects)) return fallback
 
+  const hasGeneratedDesign = saved.generatedDesign
+    && saved.generatedDesign.version === 1
+    && typeof saved.generatedDesign.bodyHtml === 'string'
+    && typeof saved.generatedDesign.css === 'string'
+    && Array.isArray(saved.generatedDesign.effects)
+
+  const templateId = TEMPLATE_IDS.includes(saved.templateId as TemplateId)
+    ? saved.templateId as TemplateId
+    : fallback.templateId
+
   return {
     ...fallback,
     ...saved,
     skills: Array.isArray(saved.skills) ? saved.skills : fallback.skills,
     projects: saved.projects,
     socials: Array.isArray(saved.socials) ? saved.socials : fallback.socials,
-    templateId: TEMPLATE_IDS.includes(saved.templateId as TemplateId) ? saved.templateId as TemplateId : fallback.templateId
+    templateId: templateId === 'generated' && !hasGeneratedDesign ? fallback.templateId : templateId,
+    generatedDesign: hasGeneratedDesign ? saved.generatedDesign : undefined
   }
 }

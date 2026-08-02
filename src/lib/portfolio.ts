@@ -1,4 +1,5 @@
 import type { PortfolioData, TemplateId } from '../types'
+import { generatedRuntimeScript, generatedRuntimeStyles, renderGeneratedBody } from './generatedPage'
 
 const textEncoder = new TextEncoder()
 
@@ -153,7 +154,7 @@ const sharedStyles = `
       .section-heading h2 { font-size: 30px; }
     }`
 
-const templateStyles: Record<TemplateId, string> = {
+const templateStyles: Record<Exclude<TemplateId, 'generated'>, string> = {
   professional: `
     :root { --ink: #17211f; --muted: #68716e; --line: #d8dedb; --paper: #f8f9f7; }
     .hero { display: grid; grid-template-columns: minmax(0, 1fr) 250px; gap: 48px; align-items: center; padding-block: 72px 90px; }
@@ -266,8 +267,34 @@ function renderPortfolioBody(content: PortfolioContent): string {
 }
 
 export function createPortfolioHtml(data: PortfolioData, options: { preview?: boolean } = {}): string {
-  const templateId: TemplateId = Object.prototype.hasOwnProperty.call(templateStyles, data.templateId)
-    ? data.templateId
+  if (data.templateId === 'generated' && data.generatedDesign) {
+    try {
+      const generated = renderGeneratedBody(data, data.generatedDesign)
+      const csp = "default-src 'none'; img-src data: blob:; media-src data: blob:; font-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; frame-src 'none'"
+      return `<!doctype html>
+<html lang="zh-CN" data-template="generated" data-preview="${options.preview ? 'true' : 'false'}">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  ${options.preview ? '<base href="about:srcdoc">' : ''}
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
+  <meta name="description" content="${escapeHtml(data.name || '我的主页')} 的个人主页">
+  <title>${escapeHtml(data.name || '我的主页')} | 个人主页</title>
+  <style>
+    :root { --accent: ${safeColor(data.accentColor)}; }
+    ${generatedRuntimeStyles}
+    ${generated.design.css}
+  </style>
+</head>
+<body>${generated.body}<script>${generatedRuntimeScript}</script></body>
+</html>`
+    } catch {
+      // Invalid generated drafts fall back to the stable professional template.
+    }
+  }
+
+  const templateId: Exclude<TemplateId, 'generated'> = Object.prototype.hasOwnProperty.call(templateStyles, data.templateId)
+    ? data.templateId as Exclude<TemplateId, 'generated'>
     : 'professional'
   const content = renderPortfolioContent(data)
 
