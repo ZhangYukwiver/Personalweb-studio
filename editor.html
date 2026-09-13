@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>内容编辑器 · 个人主页</title>
+<style>
+body{margin:0;height:100dvh;display:grid;grid-template-columns:minmax(400px,46%) 1fr;grid-template-rows:50px 1fr;font:14px/1.6 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;color:#1a1d26;background:#f4f5f7}
+header{grid-column:1/-1;display:flex;align-items:center;gap:8px;padding:0 14px;background:#fff;border-bottom:1px solid #e3e5ea}
+header b{margin-right:8px}
+.form{overflow:auto;padding:14px 16px 80px;border-right:1px solid #e3e5ea}
+.preview{background:#0b0f1a;position:relative}
+iframe{width:100%;height:100%;border:0;display:block}
+.nopv{position:absolute;inset:0;display:none;place-items:center;color:#fff;text-align:center;padding:24px;line-height:1.8}
+fieldset{border:1px solid #e3e5ea;border-radius:10px;background:#fff;padding:10px 12px 12px;margin:0 0 12px;min-width:0}
+legend{font-weight:700;padding:0 6px}
+label{display:block;font-size:12px;color:#5b6170;margin:8px 0 3px}
+input[type=text],textarea{width:100%;box-sizing:border-box;border:1px solid #d5d8de;border-radius:6px;padding:6px 8px;font:inherit;background:#fff}
+textarea{min-height:64px;resize:vertical}
+textarea.md{min-height:240px;font-family:ui-monospace,Menlo,monospace;font-size:13px;line-height:1.6}
+button{font:inherit;border:1px solid #d5d8de;background:#fff;border-radius:6px;padding:6px 10px;cursor:pointer}
+button:hover{background:#f0f2f5}
+button.primary{background:#2f5bea;color:#fff;border-color:transparent}
+button.primary:hover{background:#2449c2}
+button.sm{padding:3px 8px;font-size:12px}
+.row{display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-top:6px}
+.item{border:1px dashed #cfd3da;border-radius:8px;padding:8px 10px;margin:8px 0;background:#fafbfc}
+.status{margin-left:auto;font-size:12px;color:#5b6170;max-width:40%;text-align:right}
+.thumb{width:72px;height:45px;object-fit:cover;border-radius:4px;border:1px solid #d5d8de;background:#ddd}
+.hint{font-size:12px;color:#5b6170;margin:4px 0 0}
+dialog{border:1px solid #d5d8de;border-radius:12px;padding:20px;width:min(560px,92vw)}
+dialog::backdrop{background:rgba(0,0,0,.35)}
+dialog p{margin:0 0 10px}
+code{background:#eef0f4;padding:1px 5px;border-radius:4px}
+@media (max-width:900px){body{grid-template-columns:1fr;grid-template-rows:50px 1fr 42vh}.form{border-right:0;border-bottom:1px solid #e3e5ea}}
+</style>
+</head>
+<body>
+<header>
+  <b>内容编辑器</b>
+  <button id="btnReset" class="sm" title="放弃本机草稿，重新读取当前线上/文件里的内容">重新读取</button>
+  <button id="btnDownload" class="sm">下载 content.js</button>
+  <button id="btnSettings" class="sm">发布设置</button>
+  <button id="btnPublish" class="primary">发布到 GitHub</button>
+  <span class="status" id="status">改动会自动存在本机浏览器里，发布后才上线</span>
+</header>
+<div class="form" id="form"></div>
+<div class="preview"><iframe id="pv" src="index.html"></iframe><div class="nopv" id="nopv">本地双击打开时无法实时预览。<br>请在上线后的网址打开编辑器，或在本地用服务器打开（见 README）。<br>编辑和“下载 content.js”仍然可用。</div></div>
+
+<dialog id="dlg">
+  <h3 style="margin:0 0 12px">发布设置</h3>
+  <p class="hint">发布 = 用 GitHub API 把 content.js 和新图片提交到仓库，GitHub Pages 会在一分钟左右自动更新。Token 只保存在你这台电脑的浏览器里。</p>
+  <label>GitHub 用户名</label><input type="text" id="sOwner" placeholder="ZhangYukwiver">
+  <label>仓库名</label><input type="text" id="sRepo" placeholder="Personalweb-studio">
+  <label>分支</label><input type="text" id="sBranch" placeholder="main">
+  <label>Token（Fine-grained，只勾这个仓库，权限 Contents: Read and write）</label><input type="text" id="sToken" placeholder="github_pat_…">
+  <p class="hint">生成地址：<code>github.com/settings/personal-access-tokens/new</code></p>
+  <div class="row" style="justify-content:flex-end"><button id="sCancel">取消</button><button id="sSave" class="primary">保存</button></div>
+</dialog>
+
+<script src="content.js"></script>
+<script>
+(function(){
+  var KEY='zy-editor-draft',SKEY='zy-editor-settings';
+  var form=document.getElementById('form'),pv=document.getElementById('pv'),status=document.getElementById('status');
+  var pending={}; // 待上传的新图片：仓库路径 -> {blob,url}
+  var C=(function(){try{var d=localStorage.getItem(KEY);if(d)return JSON.parse(d)}catch(e){}return JSON.parse(JSON.stringify(window.CONTENT||{}))})();
+
+  // ---------- 小工具 ----------
+  function el(tag,attrs,children){var e=document.createElement(tag);Object.keys(attrs||{}).forEach(function(k){if(k==='text')e.textContent=attrs[k];else if(k.slice(0,2)==='on')e[k]=attrs[k];else e.setAttribute(k,attrs[k])});(children||[]).forEach(function(c){if(c)e.appendChild(typeof c==='string'?document.createTextNode(c):c)});return e}
+  function btn(t,fn,cls){return el('button',{type:'button',class:cls||'sm',text:t,onclick:fn})}
+  function input(obj,key,label,o){o=o||{};var i=o.md||o.multi?el('textarea',{class:o.md?'md':''}):el('input',{type:'text'});i.value=obj[key]==null?'':obj[key];i.oninput=function(){obj[key]=i.value;changed()};return el('div',{},[el('label',{text:label}),i,o.hint?el('div',{class:'hint',text:o.hint}):null])}
+  function list(title,arr,make,blank,hint){
+    var box=el('fieldset',{},[el('legend',{text:title}),hint?el('div',{class:'hint',text:hint}):null]);
+    arr.forEach(function(it,i){
+      var item=el('div',{class:'item'},make(it,i));
+      item.appendChild(el('div',{class:'row'},[btn('上移',function(){if(i>0){arr.splice(i-1,0,arr.splice(i,1)[0]);rerender()}}),btn('下移',function(){if(i<arr.length-1){arr.splice(i+1,0,arr.splice(i,1)[0]);rerender()}}),btn('删除',function(){if(confirm('删除这一项？')){arr.splice(i,1);rerender()}})]));
+      box.appendChild(item)});
+    box.appendChild(btn('＋ 添加一项',function(){arr.push(JSON.parse(JSON.stringify(blank)));rerender()}));
+    return box}
+  function previewSrc(src){return pending[src]?pending[src].url:src}
+
+  // ---------- 表单 ----------
+  function render(){
+    form.innerHTML='';
+    form.appendChild(el('fieldset',{},[el('legend',{text:'基本信息'}),input(C,'name','姓名'),input(C,'tag','顶部小字'),input(C,'intro','一句简介',{multi:1}),input(C,'footer','页脚')]));
+    form.appendChild(list('右上角按钮',C.links=C.links||[],function(l){return [input(l,'text','文字'),input(l,'href','链接（网址 / mailto: / assets/文件）')]},{text:'',href:''}));
+    form.appendChild(list('首页小弹层（关于我等）',C.notes=C.notes||[],function(n){return [input(n,'title','标题'),input(n,'text','内容（Markdown）',{md:1})]},{title:'',text:''},'写法：## 小标题、- 列表、**加粗**、[文字](链接)、| 表格 |、> 备注；空行分段'));
+    form.appendChild(list('小弹层旁的链接按钮',C.extraChips=C.extraChips||[],function(l){return [input(l,'text','文字'),input(l,'href','链接')]},{text:'',href:''}));
+    form.appendChild(list('项目 / 经历（顺序 = 首页轮播顺序）',C.projects=C.projects||[],function(p){
+      var imgs=el('div');
+      function drawImgs(){
+        imgs.innerHTML='';
+        (p.images=p.images||[]).forEach(function(im,i){
+          var cap=el('input',{type:'text',placeholder:'图注'});cap.value=im.caption||'';cap.oninput=function(){im.caption=cap.value;changed()};cap.style.flex='1';cap.style.width='auto';
+          imgs.appendChild(el('div',{class:'row'},[el('img',{class:'thumb',src:previewSrc(im.src),alt:''}),cap,
+            btn('上移',function(){if(i>0){p.images.splice(i-1,0,p.images.splice(i,1)[0]);changed();drawImgs()}}),
+            btn('下移',function(){if(i<p.images.length-1){p.images.splice(i+1,0,p.images.splice(i,1)[0]);changed();drawImgs()}}),
+            btn('设为底图',function(){p.cover=im.src;changed();rerender()}),
+            btn('删除',function(){p.images.splice(i,1);changed();drawImgs()})]))});
+        var f=el('input',{type:'file',accept:'image/*',multiple:''});
+        f.onchange=function(){Array.prototype.forEach.call(f.files,function(file){addImage(p,file,drawImgs)})};
+        imgs.appendChild(el('label',{text:'添加图片（自动压到 1600 宽的 JPG，发布时一起上传到 assets/）'}));imgs.appendChild(f)}
+      drawImgs();
+      return [input(p,'id','内页地址（英文或数字，例如 dy）'),input(p,'idx','卡片左上小字'),input(p,'title','标题'),input(p,'sub','副标题'),
+        input(p,'cover','首页大屏底图（图片路径，可留空）'),input(p,'more','上大屏时多显示的一段',{multi:1}),input(p,'count','卡片底部小字'),
+        input(p,'headIdx','内页标题上方小字'),input(p,'desc','内页标题下一句',{multi:1}),
+        list('内页右上按钮',p.links=p.links||[],function(l){return [input(l,'text','文字'),input(l,'href','链接')]},{text:'',href:''}),
+        el('fieldset',{},[el('legend',{text:'图片（有图：左上大图 + 下方缩略图；没图：整页文字）'}),imgs]),
+        input(p,'article','正文（Markdown）',{md:1})]
+    },{id:'',idx:'',title:'',sub:'',cover:'',more:'',count:'',headIdx:'',desc:'',links:[],images:[],article:''}));
+  }
+  function rerender(){changed();render()}
+
+  // ---------- 图片 ----------
+  function addImage(p,file,cb){
+    var img=new Image();
+    img.onload=function(){
+      var W=Math.min(1600,img.naturalWidth),H=Math.round(img.naturalHeight*W/img.naturalWidth),c=document.createElement('canvas');
+      c.width=W;c.height=H;c.getContext('2d').drawImage(img,0,0,W,H);
+      c.toBlob(function(blob){
+        var base=file.name.replace(/\.[^.]+$/,'').replace(/[^A-Za-z0-9_-]+/g,'');
+        var path='assets/'+(p.id||'img').replace(/[^A-Za-z0-9_-]/g,'')+'/'+(base||'img')+'-'+Date.now().toString(36)+'.jpg';
+        pending[path]={blob:blob,url:URL.createObjectURL(blob)};
+        p.images.push({src:path,caption:file.name.replace(/\.[^.]+$/,'')});
+        changed();cb();
+      },'image/jpeg',.82)};
+    img.src=URL.createObjectURL(file)}
+
+  // ---------- 预览 ----------
+  var timer;
+  function changed(){clearTimeout(timer);timer=setTimeout(function(){try{localStorage.setItem(KEY,JSON.stringify(C))}catch(e){}preview()},300)}
+  function previewContent(){var D=JSON.parse(JSON.stringify(C));(D.projects||[]).forEach(function(p){if(pending[p.cover])p.cover=pending[p.cover].url;(p.images||[]).forEach(function(im){if(pending[im.src])im.src=pending[im.src].url})});return D}
+  function preview(){
+    try{var w=pv.contentWindow;if(!w||!w.renderSite)return;var h=w.location.hash;w.renderSite(previewContent());if(h)w.location.replace(w.location.href.split('#')[0]+h);w.initCarousel()}
+    catch(e){document.getElementById('nopv').style.display='grid'}
+  }
+  pv.onload=function(){try{void pv.contentWindow.document;preview()}catch(e){document.getElementById('nopv').style.display='grid'}};
+
+  // ---------- 生成 content.js ----------
+  function serialize(C){
+    function str(s){s=String(s==null?'':s);return s.indexOf('\n')>=0?'`'+s.replace(/\\/g,'\\\\').replace(/`/g,'\\`').replace(/\$\{/g,'\\${')+'`':JSON.stringify(s)}
+    function val(v,ind){
+      if(Array.isArray(v))return v.length?'[\n'+v.map(function(x){return ind+'  '+val(x,ind+'  ')}).join(',\n')+'\n'+ind+']':'[]';
+      if(v&&typeof v==='object')return '{\n'+Object.keys(v).map(function(k){return ind+'  '+k+': '+val(v[k],ind+'  ')}).join(',\n')+'\n'+ind+'}';
+      return str(v)}
+    return '// 个人主页内容：由编辑器生成，也可以直接手改（长文是 Markdown）\nwindow.CONTENT = '+val(C,'')+';\n'}
+  function download(){var b=new Blob([serialize(C)],{type:'text/javascript;charset=utf-8'});var a=el('a',{href:URL.createObjectURL(b),download:'content.js'});document.body.appendChild(a);a.click();a.remove();status.textContent='已下载 content.js，替换网站目录里的同名文件即可'}
+
+  // ---------- 发布到 GitHub ----------
+  function settings(){try{return JSON.parse(localStorage.getItem(SKEY)||'{}')}catch(e){return {}}}
+  var dlg=document.getElementById('dlg');
+  function openSettings(){var S=settings();sOwner.value=S.owner||'';sRepo.value=S.repo||'';sBranch.value=S.branch||'main';sToken.value=S.token||'';dlg.showModal()}
+  document.getElementById('sSave').onclick=function(){localStorage.setItem(SKEY,JSON.stringify({owner:sOwner.value.trim(),repo:sRepo.value.trim(),branch:sBranch.value.trim()||'main',token:sToken.value.trim()}));dlg.close();status.textContent='设置已保存在本机'};
+  document.getElementById('sCancel').onclick=function(){dlg.close()};
+  function b64(s){var bytes=new TextEncoder().encode(s),bin='';for(var i=0;i<bytes.length;i+=0x8000)bin+=String.fromCharCode.apply(null,bytes.subarray(i,i+0x8000));return btoa(bin)}
+  function blobB64(blob){return new Promise(function(res){var fr=new FileReader();fr.onload=function(){res(fr.result.split(',')[1])};fr.readAsDataURL(blob)})}
+  async function putFile(S,path,content64){
+    var api='https://api.github.com/repos/'+S.owner+'/'+S.repo+'/contents/'+path.split('/').map(encodeURIComponent).join('/');
+    var H={Authorization:'Bearer '+S.token,Accept:'application/vnd.github+json'};
+    var sha=null,r=await fetch(api+'?ref='+encodeURIComponent(S.branch),{headers:H});
+    if(r.ok)sha=(await r.json()).sha;else if(r.status!==404)throw new Error('读取 '+path+' 失败：'+r.status);
+    var body={message:'更新 '+path,content:content64,branch:S.branch};if(sha)body.sha=sha;
+    var w=await fetch(api,{method:'PUT',headers:Object.assign({'Content-Type':'application/json'},H),body:JSON.stringify(body)});
+    if(!w.ok)throw new Error('提交 '+path+' 失败：'+w.status+' '+(await w.text()).slice(0,160))}
+  async function publish(){
+    var S=settings();if(!S.owner||!S.repo||!S.token){openSettings();return}
+    if(!confirm('把当前内容发布到 '+S.owner+'/'+S.repo+'（'+S.branch+'）？'))return;
+    var b=document.getElementById('btnPublish');b.disabled=true;status.textContent='发布中…';
+    try{
+      var paths=Object.keys(pending);
+      for(var i=0;i<paths.length;i++){status.textContent='上传图片 '+(i+1)+'/'+paths.length;await putFile(S,paths[i],await blobB64(pending[paths[i]].blob))}
+      status.textContent='提交 content.js…';await putFile(S,'content.js',b64(serialize(C)));
+      pending={};status.textContent='已发布 '+new Date().toLocaleTimeString()+'，GitHub Pages 大约一分钟后更新';
+    }catch(e){status.textContent='发布失败：'+e.message}
+    b.disabled=false}
+
+  // ---------- 按钮 ----------
+  document.getElementById('btnPublish').onclick=publish;
+  document.getElementById('btnSettings').onclick=openSettings;
+  document.getElementById('btnDownload').onclick=download;
+  document.getElementById('btnReset').onclick=function(){if(confirm('放弃本机草稿，重新读取当前内容？')){localStorage.removeItem(KEY);location.reload()}};
+  render();
+})();
+</script>
+</body>
+</html>
