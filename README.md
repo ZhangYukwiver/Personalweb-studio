@@ -11,10 +11,11 @@
 - 网页：`https://zhangyukwiver.github.io/Personalweb-studio/`
 - 编辑器：`https://zhangyukwiver.github.io/Personalweb-studio/editor.html`
 
-本地改完想推上去：
+本地改完想推上去（这台 Mac 的 gh 默认账号是 Kerwin-WUKO，推之前先切到 ZhangYukwiver）：
 
 ```bash
 cd /Users/a0000/Documents/1project/zhangyu-homepage
+gh auth switch --user ZhangYukwiver
 git add -A && git commit -m "更新内容" && git push
 ```
 
